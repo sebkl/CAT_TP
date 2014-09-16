@@ -14,7 +14,7 @@ type Packet struct {
 }
 
 func (p *Packet) String() string{
-	return fmt.Sprintf("|%15s:%5d > %15s:%5d|%s v%d |hl %d |p %d > %d |dl %5d |sq %5d |ac %5d |ck %5d |pl %5d %s",
+	return fmt.Sprintf("|%15s:%5d > %15s:%5d|%s v%d |hl %d |p %d > %d |dl %5d |sq %5d |ac %5d |ws %5d |ck %5d |pl %5d |mps %d |mss %d %s",
 		p.ip.SrcAddr(),
 		p.udp.SrcPort,
 		p.ip.DestAddr(),
@@ -27,8 +27,11 @@ func (p *Packet) String() string{
 		p.DataLen(),
 		p.SeqNo(),
 		p.AckNo(),
+		p.WindowSize(),
 		p.CheckSum(),
 		len(p.Payload()),
+		p.MaxPDUSize(),
+		p.MaxSDUSize(),
 		p.TypeString(),
 	)
 }
