@@ -125,7 +125,19 @@ type Connection struct {
 	receiveWindow *ReceiveWindow
 	sendWindow *SendWindow
 	handler Handler
+	/* channels
+	pkgin chan *Header // checks which one was acked and removes timer from timer queue 
+	pkgout chan *Header // Generated packets from Write call ... will be stupidly forwarded to a private send method
+	timer Queue  // ordered array or queue for retransmit timeouts, indexed by timestamp when over */
 }
+
+func (c *Connection) LocalPort() uint16 { return c.lport }
+
+func (c *Connection) RemotePort() uint16 { return c.rport }
+
+func (c *Connection) LocalAddr() net.Addr { return c.conn.LocalAddr() }
+
+func (c *Connection) RemoteAddr() *net.UDPAddr { return c.raddr }
 
 // This is the initial sequence number for the sending activity. This shall be the 
 // sequence number that was previously sent in the SYN PDU.
@@ -199,13 +211,15 @@ func (c *Connection) StateS() (ret string) {
 	return
 }
 
-func (c *Connection) send(p *Header) (err error) {
+func (c *Connection) Send(p *Header) (err error) {
 	//log.Printf("> |%s|%d > %d|%5d|%5d|dl %5d |chk %5d %s",p.FlagString(),p.SrcPort(),p.DestPort(),p.SeqNo(),p.AckNo(),p.DataLen(),p.CheckSum(),p.TypeString())
 
 	var w int
 	log.Printf("%s Sending %s packet to: %s",c.StateS(),p.TypeS(),c.raddr.String())
+	log.Printf(">%s",p.String())
 
-	if p.Type() == DATAACK {
+	t := p.Type()
+	if t == DATAACK || t == NUL {
 		//TODO: If window full, queue packet locally or block send call
 		c.sendWindow.Add(p)
 	}
@@ -266,7 +280,7 @@ func Connect(addr string, lport, rport uint16, ids ...[]byte) (con *Connection, 
 			id )
 
 	con.syn= syn
-	err = con.send(syn)
+	err = con.Send(syn)
 	for con.state = SYNSENT;con.state != OPEN; {
 		p,_,err := readPacket(con.conn)
 		if err == nil {
@@ -319,7 +333,7 @@ func (c *Connection) Close() (err error) {
 					c.SND_NXT_SEQ_NB(),
 					c.RCV_CUR_SEQ_NB(),
 					0)
-			err = c.send(rst)
+			err = c.Send(rst)
 			c.state = CLOSEWAIT
 			//TODO: setup timer
 			c.closeSocket()
@@ -350,7 +364,7 @@ func (c *Connection) processPacket(h *Header) (err error) {
 			if h.Type() == SYN {
 				sa := NewSYNACK(h,c.RCV_WIN_SIZE(),0,0)
 				c.syn = sa
-				err = c.send(sa)
+				err = c.Send(sa)
 				c.state = SYNRCVD
 				return err
 			}
@@ -372,7 +386,7 @@ func (c *Connection) processPacket(h *Header) (err error) {
 							c.SND_NXT_SEQ_NB(),
 							c.RCV_WIN_SIZE())
 					//Send ACK
-					err = c.send(ack)
+					err = c.Send(ack)
 					// To OPEN
 					c.state = OPEN
 					return err
@@ -430,7 +444,7 @@ func (c *Connection) processPacket(h *Header) (err error) {
 								c.SND_NXT_SEQ_NB(),
 								c.RCV_WIN_SIZE())
 
-						err = c.send(ack)
+						err = c.Send(ack)
 					}
 
 					// take data
@@ -449,7 +463,8 @@ func (c *Connection) processPacket(h *Header) (err error) {
 					ack := NewACK(	h,
 							c.SND_NXT_SEQ_NB(),
 							c.RCV_WIN_SIZE())
-					err = c.send(ack)
+					err = c.Send(ack)
+					return
 			}
 	}
 	return fmt.Errorf("Unexpected packet of type %s in state %s.",h.TypeS(),c.StateS())
@@ -481,7 +496,7 @@ func (c *Connection) write() (err error) {
 				c.RCV_CUR_SEQ_NB(),
 				DefaultWindowSize,
 				mb[:rs])
-	return c.send(p)
+	return c.Send(p)
 }
 
 func (c *Connection) readPayload(p *Header) (err error) {
@@ -554,7 +569,7 @@ func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 	if err != nil {
 		log.Printf("Error: %s\n%x",err,buf)
 	}
-	log.Printf("%s",ret.String())
+	log.Printf("<%s",ret.String())
 	return ret,raddr,err
 }
 

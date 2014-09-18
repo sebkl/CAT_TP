@@ -102,5 +102,33 @@ func TestBlindConnect(t *testing.T) {
 	}
 }
 
+func TestNULPDU(t *testing.T) {
+	srv,err := Listen("localhost:8770",9000)
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+	go srv.Loop(EchoHandler)
 
+
+	c,err := Connect("localhost:8770",1,9000)
+	if err != nil {
+		t.Errorf("Could not connect to server: %s",err)
+	}
+
+	go c.Loop(func(c *Connection,data []byte) { })
+
+	p := NewNUL(0,c.LocalPort(), c.RemotePort(),c.SND_NXT_SEQ_NB(), c.RCV_CUR_SEQ_NB(), c.receiveWindow.WindowSize())
+	c.Send(p)
+
+	//Wait for ACK
+	time.Sleep(200 * time.Millisecond)
+
+	//Check if ack was received.
+	if c.sendWindow.last != p.SeqNo() {
+		t.Errorf("Did not receive ACK for NUL PDU.")
+	}
+
+	srv.Close()
+	c.Close()
+}
 

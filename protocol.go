@@ -7,6 +7,8 @@ import(
 	"fmt"
 	"crypto/md5"
 	"encoding/base64"
+	"strings"
+	"strconv"
 )
 
 
@@ -207,6 +209,11 @@ func (p *Header) TypeString() string {
 			return fmt.Sprintf("|il %3d",p.IdentificationLen())
 		case RST:
 			return fmt.Sprintf("|rc %2d|%s",int(p.ReasonCode()),p.ReasonString())
+		case EAK:
+			acks := p.ExtendedAcks()
+			sacks := make([]string,len(acks))
+			for i,a := range acks { sacks[i] = strconv.Itoa(int(a)) }
+			return fmt.Sprintf("|acks %s", strings.Join(sacks,","))
 		default:
 			return fmt.Sprintf("|-")
 	}
@@ -318,7 +325,7 @@ func (p *Header) setFlags(flags byte, version byte) {
 	p.hdr[0] = p.raw[0]
 }
 
-func (p *Header) setHeaderLen(l byte) { p.raw[3] = l }
+func (p *Header) setHeaderLen(l byte) { p.raw[3] = l; p.hdr[3] = l }
 
 func (p *Header) setRFU(rfu uint16) { p.setShort(1,rfu) }
 
