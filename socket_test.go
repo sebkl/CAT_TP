@@ -119,9 +119,64 @@ func TestNULPDU(t *testing.T) {
 }
 
 func TestSYNRetransmit(t *testing.T) {
-	_,err := ConnectWait("localhost:8770",1,9000,[]byte{},LogHandler)
+	c,err := ConnectWait("localhost:8770",1,9000,[]byte{},LogHandler)
 	if err == nil {
 		t.Errorf("Connect should have failed.")
 	}
+
+	if c.sendWindow.rtcount < RetransmitCount {
+		t.Errorf("SYN has not been retransmitted.")
+	}
 }
 
+func TestDATACKRetransmit(t *testing.T) {
+	srv,err := Listen("localhost:8770",9000,EchoHandler)
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+
+	c,err:= ConnectWait("localhost:8770",1,900,[]byte{},LogHandler)
+
+	srv.Kill(false)
+	c.Write([]byte{'a','b'})
+
+
+	c.WaitForClose()
+
+	if c.sendWindow.rtcount < RetransmitCount {
+		t.Errorf("ACK has not been retransmitted.")
+	}
+}
+
+func TestNULEAK(t *testing.T) {
+	srv,err := Listen("localhost:8770",9000,EchoHandler)
+	var rec []byte
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+
+	c,err:= ConnectWait("localhost:8770",1,9000,[]byte{},func(c *Connection, h []*Header, data []byte) { rec = data })
+
+	time.Sleep(200 * time.Millisecond)
+
+	x := c.SND_NXT_SEQ_NB()
+
+	p := NewNUL(0,c.LocalPort(), c.RemotePort(),x+1, c.RCV_CUR_SEQ_NB(), c.receiveWindow.WindowSize())
+	c.Send(p)
+
+	time.Sleep(200 * time.Millisecond)
+
+	p = NewNUL(0,c.LocalPort(), c.RemotePort(),x, c.RCV_CUR_SEQ_NB(), c.receiveWindow.WindowSize())
+	c.Send(p)
+
+	c.Write([]byte{'a','b'})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if rec[0] != 'a' {
+		t.Errorf("Data has not been properly transmitted.")
+	}
+
+	c.Close()
+	srv.CloseWait()
+}

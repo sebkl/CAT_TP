@@ -64,6 +64,10 @@ func NewSeqNo() uint16 {
 
 func (p *Header) NeedsAck() bool { t:= p.Type(); return t== DATAACK || t == NUL || t == SYN }
 
+func (p *Header) SupportsEAK() bool { return p.ACK() && !p.SYN() }
+
+func (p* Header) Flags() byte { return p.hdr[0] & 0xfc }
+
 func (p *Header) SYN() bool { return (p.hdr[0] & SYN_FLAG) > 0 }
 
 func (p *Header) ACK() bool { return (p.hdr[0] & ACK_FLAG) > 0 }
@@ -240,6 +244,45 @@ func (p *Header) BinaryString(mc ...int) string {
 	return ret
 }
 
+func (p *Header) Raw() []byte {
+	if len(p.raw) <= 0 {
+		buf := make([]byte,DefaultMaxPDUSize)
+		p.raw = buf
+		c:=0
+
+		//Copy standatd header
+		copy(p.raw[:len(p.hdr)],p.hdr[:])
+		c+= len(p.hdr)
+
+		if p.SYN() {
+			copy(buf[c:],p.synpduhdr[:])
+			c+=len(p.synpduhdr)
+			copy(buf[c:],p.identification)
+			c+=len(p.identification)
+		}
+
+		if p.RST() {
+			buf[BASE_HLEN] = p.ReasonCode()
+			c++
+		}
+
+		if p.EAK() {
+			copy(buf[c:],p.eakpduhdr)
+			c+=len(p.eakpduhdr)
+		}
+
+		p.setHeaderLen(byte(c))
+
+		if len(p.payload) > 0 {
+			copy(buf[c:],p.payload)
+			c+=len(p.payload)
+			p.setDataLen(uint16(len(p.payload)))
+		}
+		p.raw = buf[:c]
+	}
+	return p.raw
+}
+
 // NewHeader creates a new cattp packet based on an existing pcap packet. Error is returned if
 // the pcap packet is not a cattp packet.
 func NewHeader(raw []byte) (ret *Header,err error) {
@@ -347,6 +390,22 @@ func (p *Header) setCheckSum(sum uint16) { p.setShort(16,sum) }
 
 func (p *Header) setReasonCode(c byte) { p.rstpduhdr = c }
 
+func (p *Header) setExtendedAcks(eaks []uint16) {
+	if len(eaks) > 0 {
+		p.setFlags(p.Flags() | EAK_FLAG,p.Version())
+
+		p.eakpduhdr = make([]byte,2*len(eaks))
+		for i,eak := range eaks {
+			idx := i *2
+			p.eakpduhdr[idx] = byte( (eak & 0xff00) >> 8 )
+			p.eakpduhdr[idx + 1] = byte(eak & 0x00ff)
+		}
+		//Regenerate packet data
+		p.raw = nil
+		p.Raw()
+	}
+}
+
 func (p *Header) setData(d []byte) {
 	p.payload = make([]byte,len(d))
 	for i:=0;i < len(d);i++ {
@@ -398,7 +457,7 @@ func (p *Header) String() string {
 			)
 }
 
-func (p *Header) Raw() []byte { return p.raw }
+
 
 func New(flags, version byte,srcport, destport,seq,ack, wsize, datlen uint16) (ret *Header){
 	ret = &Header{}
@@ -489,6 +548,10 @@ func NewACK(p *Header, seqno, wsize uint16) *Header {
 			0  )
 }
 
+func (p *Header) SetEAK(eaks []uint16) {
+	p.setExtendedAcks(eaks)
+	p.UpdateCheckSum()
+}
 
 func NewDataACK(version byte, srcport,destport,seqno,ackno,wsize uint16, data []byte) (ret *Header) {
 	ret = New(ACK_FLAG,version,srcport,destport,seqno,ackno,wsize,uint16(len(data)))

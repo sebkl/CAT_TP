@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+//Connection states
 const (
 	CLOSE = iota
 	LISTEN = iota
@@ -17,10 +18,14 @@ const (
 	SYNSENT = iota
 )
 
+//RetransmitCount is a configurable value to specify the amount of retries 
+// that will be performed until a connection is considered to be disconnected.
 var RetransmitCount int = 2
+
 var RetransmitTimeout time.Duration = 2 * time.Second
 var CLOSEWAITTimeout time.Duration = 1 * time.Second
 
+// Server represents a listen server (UDP) that accepts client connections.
 type Server struct {
 	closing bool
 	conn *net.UDPConn
@@ -30,6 +35,8 @@ type Server struct {
 	closewait chan error
 }
 
+// SendWindow keeps track of which sent packets have been acknowledged or not.
+// Acknowledged packets are removed from the window and others could be retransmitted.
 type SendWindow  struct {
 	buf map[uint16]*Header
 	last uint16 /* last acknowledged */
@@ -37,23 +44,35 @@ type SendWindow  struct {
 	rtcount int /* retransmit count */
 }
 
+
+// ReceiveWindow keeps track of the incoming sequence. Out of sequence packets 
+// will be stored and only returned in the correct sequence.
 type ReceiveWindow struct {
 	buf []*Header
 	last uint16 /* last in order */
 	lastHeader *Header
 }
 
+//  Handler is the callback type for incoming data (on both sides)
 type Handler func (c *Connection,ps []*Header, data []byte)
 
+// EchoHandler is a default handler that just prints the payload
+// to stdout.
 func EchoHandler (c *Connection,ps []*Header, data []byte) {
 	r,_ := c.Write(data)
 	log.Printf("Echoed data: %s/%d",string(data),r)
 }
 
+
+// LogHandler logs the packet structure to the logging framework.
 func LogHandler(c *Connection,ps []*Header, data []byte) {
 	log.Printf(">#%X\n",data)
 }
 
+
+// BufferHandler is the default handler that pushes all incoming
+// data to the corresponding buffer. This data can be read by using
+// the io.Reader interface accordingly.
 func BufferHandler (c *Connection,ps []*Header, data []byte) {
 	dl := len(data)
 	var err error
@@ -62,39 +81,64 @@ func BufferHandler (c *Connection,ps []*Header, data []byte) {
 	}
 }
 
+//IgnoreHandler ignoresincoming bytes
+func IgnoreHandler (c* Connection,ps []*Header, data []byte) {}
+
+//clientKey is an internally used function to identify connections on UDP level
 func clientKey(a *net.UDPAddr) string {
 	return a.String()
 }
 
+
+// NewSendWindow initializes a sending window.
 func NewSendWindow(last uint16,size uint16) *SendWindow {
 	// Size is ignored
 	return &SendWindow{buf: make(map[uint16]*Header),last: last,newest: last}
 }
 
+// NewReceiveWindow initializes a new receive window.
 func NewReceiveWindow(inorder uint16, size uint16) *ReceiveWindow {
 	return &ReceiveWindow{buf: make([]*Header,size),last: inorder }
 }
 
+
+// Add adds a packet to the sent window once it was sent.
 func (s *SendWindow) Add(h *Header) *sendTimeout {
-	s.newest = h.SeqNo()
+	sn := h.SeqNo()
+	if sn >= s.newest {
+		if sn - s.newest > 1 {
+			log.Printf("Warning: Skipping Seqno.")
+		}
+		s.newest = sn
+	} else {
+		log.Printf("Warning: Sending obsolete seqno.")
+	}
 	s.buf[h.SeqNo()] = h
 	return &sendTimeout{seqno: h.SeqNo(), c: time.After(RetransmitTimeout) }
 }
 
+// Get returns a packet from the sending window based in its
+// sequence number.
 func (s *SendWindow) Get(sn uint16) *Header {
 	return s.buf[sn]
 }
 
+// Used returns the amount of packets that remain in the receive window.
 func (s *ReceiveWindow) Used() uint16 {
 	i := uint16(0)
 	for ;s.buf[i] != nil;i++ { }
 	return i
 }
 
+// WindowSize determines the space that is left in the receive window.
+// It is used to set the window size in each sent packet.
 func (s *ReceiveWindow) WindowSize() uint16 {
 	return (uint16(len(s.buf)) - s.Used())
 }
 
+//Receive takes a packet and checks whether it is out of sequence. If not it will
+// be sorted and an array of in-sequence-packets will be returned.
+// This array is empty if no in-sequence packets are available.
 func (s *ReceiveWindow) Receive(h *Header) (ret []*Header, err error){
 	s.lastHeader = h
 	idx := (h.SeqNo() - s.last) - 1
@@ -110,7 +154,7 @@ func (s *ReceiveWindow) Receive(h *Header) (ret []*Header, err error){
 	ret = make([]*Header,i)
 	if i > 0 {
 		copy(ret[:i],s.buf[:i])
-		copy(s.buf[:(len(s.buf) - i)],s.buf[(i-1):])
+		copy(s.buf[:],s.buf[i:])
 		for ii := i; ii < len(s.buf); ii++ {
 			s.buf[ii] = nil
 		}
@@ -119,9 +163,25 @@ func (s *ReceiveWindow) Receive(h *Header) (ret []*Header, err error){
 	return
 }
 
+// oosSeqNo is an internally used function to determine, which packets seqnos
+// have been received out of sequence.
+func (s *ReceiveWindow) oosSeqNo() (ret []uint16) {
+	ret = make([]uint16,0)
+	for i,p := range s.buf {
+		sn := uint16(i) + s.last + 1
+		if p != nil {
+			ret = append(ret,sn)
+		}
+	}
+	return
+}
+
+//Ack acknowledges an incoming packet. If the packet with the acknowledged
+// sequence number is in the sending window, it will be removed
 func (c *SendWindow) Ack(h *Header) error{
-	//ackknowledge regular
-	if _,ok :=c.buf[h.AckNo()]; !ok && c.last != h.AckNo() {
+	//TODO: Clarify how to deal with EAK.
+	//acknowledge regular                          // TODO: FIX THIS 
+	if _,ok :=c.buf[h.AckNo()]; !ok && (h.AckNo() > c.newest || h.AckNo() < c.last) {
 		return fmt.Errorf("Unknown ack no %d to ack last was: %d",h.AckNo(),c.last)
 	}
 
@@ -130,9 +190,7 @@ func (c *SendWindow) Ack(h *Header) error{
 		for _,a := range acks {
 			if _,ok := c.buf[a]; ok {
 				delete(c.buf,a)
-			} else {
-				return fmt.Errorf("Unknown AckNo in EACK: %d",a)
-			}
+			} // Ack of unknown packe will be ignored
 		}
 	}
 	c.last = h.AckNo()
@@ -141,11 +199,14 @@ func (c *SendWindow) Ack(h *Header) error{
 	return nil
 }
 
+// sendTimeout is an internally used function to deal with retransmit timeouts.
 type sendTimeout struct {
 	c <-chan time.Time
 	seqno uint16
 }
 
+
+// Connection represents a CAT_TP connection.
 type Connection struct {
 	syn *Header
 	server *Server
@@ -166,9 +227,11 @@ type Connection struct {
 	cwtimer chan(<-chan time.Time)
 	rttimer chan *sendTimeout
 	pkgout chan *Header // only used for manual packet sending
-	pkgin chan *Header // checks which one was acked and removes timer from timer queue 
-	dataout chan []byte // Generated packets from Write call ... will be stupidly forwarded to a private send method
-	//timer Queue  // ordered array or queue for retransmit timeouts, indexed by timestamp when over */
+
+	// checks which one was acknowledged and removes timer from timer queue 
+	pkgin chan *Header
+	// Generated packets from Write call which will be stupidly forwarded to a private send method
+	dataout chan []byte
 }
 
 func (c *Connection) LocalPort() uint16 { return c.lport }
@@ -220,6 +283,8 @@ func (c *Connection) RCV_WIN_SIZE() uint16 {
 	}
 }
 
+
+//StateS returns the current state of the connection in human readable form.
 func (c *Connection) StateS() (ret string) {
 	if c.server == nil {
 		ret = "CLT_"
@@ -245,22 +310,26 @@ func (c *Connection) StateS() (ret string) {
 	return
 }
 
+// send is an internally used method to perform the actual data sending over UDP.
 func (c *Connection) send(p *Header) (err error) {
-	//log.Printf("> |%s|%d > %d|%5d|%5d|dl %5d |chk %5d %s",p.FlagString(),p.SrcPort(),p.DestPort(),p.SeqNo(),p.AckNo(),p.DataLen(),p.CheckSum(),p.TypeString())
-
 	var w int
-	log.Printf("%s Sending %s packet to: %s",c.StateS(),p.TypeS(),c.raddr.String())
-	log.Printf(">%s",p.String())
 
-	if p.NeedsAck() {
-		//TODO: If window full, queue packet locally or block send call
-		c.rttimer <- c.sendWindow.Add(p)
+	if p.SupportsEAK() {
+		// Do EAK enrichment.
+		p.SetEAK(c.receiveWindow.oosSeqNo())
 	}
 
+	log.Printf("%s Sending %s packet to: %s",c.StateS(),p.TypeS(),c.raddr.String())
+	log.Printf(">%s",p.String())
 	if c.server != nil {
 		w,err = c.conn.WriteToUDP(p.raw,c.raddr)
 	} else {
 		w,err = c.conn.Write(p.raw)
+	}
+
+	if p.NeedsAck() {
+		//TODO: If window full, queue packet locally or block send call
+		c.rttimer <- c.sendWindow.Add(p)
 	}
 
 	if w != len(p.raw) {
@@ -270,6 +339,7 @@ func (c *Connection) send(p *Header) (err error) {
 	return
 }
 
+//NewConnection creates a new empty Connection object.
 func NewConnection(lport,rport uint16) (con *Connection) {
 	con = &Connection{	state:CLOSE,
 				connectwait: make(chan error,2),
@@ -290,7 +360,8 @@ func NewConnection(lport,rport uint16) (con *Connection) {
 	return
 }
 
-
+//retransmit performs a retransmit of the given  sequence number if
+// it remains in sending window.
 func (con *Connection) retransmit(seqno uint16) error {
 	p := con.sendWindow.Get(seqno)
 	if con.sendWindow.rtcount >= RetransmitCount {
@@ -347,6 +418,9 @@ func (con *Connection) loop() (err error){
 	return
 }
 
+
+//packetReader block as long as the connection is open and contiuesly reads
+// packets from the underlying UDP socket:
 func (con *Connection) packetReader() {
 	for ;con.state != CLOSE; {
 		p,_,err := readPacket(con.conn)
@@ -359,6 +433,7 @@ func (con *Connection) packetReader() {
 	log.Printf("Client connection to %s closed.",con.raddr.String())
 }
 
+//Connect tries to connect to a remote CAT_TP server. It is not blocking.
 func Connect(addr string, lport, rport uint16, id []byte, handlers ...Handler) (con *Connection, err error) {
 	n := "udp" /*udp4 or udp6 */
 	raddr, err := net.ResolveUDPAddr(n,addr)
@@ -400,19 +475,26 @@ func Connect(addr string, lport, rport uint16, id []byte, handlers ...Handler) (
 	return
 }
 
+//WaitForConnect blocks until the connection is established or the connection failed.
 func (con *Connection) WaitForConnect() error {
 	return <-con.connectwait
 }
 
+//WaitForClose block until the connection is in state CLOSED.
 func (con *Connection) WaitForClose() error {
 	return <-con.closewait
 }
 
+
+//ConnectWait is a convenient function for a blocking connect.
 func ConnectWait(addr string, lport, rport uint16, id []byte, handlers ...Handler) (con *Connection, err error) {
 	con,err = Connect(addr,lport,rport,id,handlers...)
 	return con,con.WaitForConnect()
 }
 
+
+//closeSocket is an internally used method to actually close the underlying UDP
+// socket.
 func (c *Connection) closeSocket() (err error) {
 	log.Printf("Closing connection %s -> %s",c.raddr.String(),c.laddr.String())
 	if c.server != nil {
@@ -423,6 +505,7 @@ func (c *Connection) closeSocket() (err error) {
 	return
 }
 
+// Close gracefully closes a CAT_TP connection.
 func (c *Connection) Close() (err error) {
 	switch c.state {
 		case LISTEN:
@@ -445,21 +528,29 @@ func (c *Connection) Close() (err error) {
 	return
 }
 
+// Close gracefully closes a listen socket.
 func (s *Server) Close() (err error) {
 	s.closing = true
 	return nil
 }
 
+// Wait blocks until the listen socket is closed. This includes
+// all open client connections.
 func (s *Server) Wait() error{
 	return <-s.closewait
 }
 
+
+// CloseWait is a convenience method for a blocking Close().
 func (s *Server) CloseWait() error{
 	err := s.Close()
 	s.Wait()
 	return err
 }
 
+
+// processPacket is an internally used method to process an incoming packet 
+// based on the current state. The state changes.
 func (c *Connection) processPacket(h *Header) (err error) {
 	log.Printf("%s Processing %s packet.",c.StateS(),h.TypeS())
 	switch c.state {
@@ -532,7 +623,7 @@ func (c *Connection) processPacket(h *Header) (err error) {
 			if h.ACK() {
 				// Verify the ack field for all packets if the ACK flag is set.
 				if err := c.sendWindow.Ack(h); err != nil {
-					return fmt.Errorf("Incorrect AckNo in ACK field of type '%s': %s",h.TypeS(),err)
+					return fmt.Errorf("%s Incorrect AckNo in ACK field of type '%s': %s",c.StateS(),h.TypeS(),err)
 				}
 			}
 
@@ -543,46 +634,57 @@ func (c *Connection) processPacket(h *Header) (err error) {
 					return
 				case ACK:
 					return
-				case DATAACK:
-					inc, er := c.receiveWindow.Receive(h)
-					if er != nil {
-						return fmt.Errorf("Incorrect received packet: %s",er)
-					}
-
-					for _,p := range inc {
-						//TODO: check if each packet has to be acked individually. or just the last
-						ack := NewACK(	p,
-								c.SND_NXT_SEQ_NB(),
-								c.RCV_WIN_SIZE())
-
-						err = c.send(ack)
-					}
-
-					//TODO: check whether to fork handler routine/thread
-					c.handler(c,inc,h.Payload())
-					return
 				case EAK: // Have been acked by initial Ack call.
-					//TODO: ACkknowledge each seq no.
+					//TODO: acknowledge each seq no.
 					if !h.NUL() {
-						break
+						return
 					}
 					// EAK is combined wirth NUL
 					// Send also an ack to this package
 					fallthrough
-				case NUL:
-					//This is just a keep alive.
-					ack := NewACK(	h,
-							c.SND_NXT_SEQ_NB(),
-							c.RCV_WIN_SIZE())
-					err = c.send(ack)
+				case DATAACK,NUL:
+					inc, er := c.receiveWindow.Receive(h)
+					if er != nil {
+						return fmt.Errorf("%s Incorrect received packet: %s",c.StateS(),er)
+					}
+
+					//oos := c.receiveWindow.oosSeqNo()
+					if len(inc) > 0 {
+						for _,p := range inc {
+							//TODO: check if each packet has to be acked individually. or just the last
+							// Only ack last if the others have already been acked
+							ack := NewACK(	p,
+									c.SND_NXT_SEQ_NB(),
+									c.RCV_WIN_SIZE())
+
+							err = c.send(ack)
+
+							//TODO: check whether to fork handler routine/thread
+							if p.DataLen() > 0 {
+								c.handler(c,inc,p.Payload())
+							}
+						}
+					} else {
+						ack:= New(	ACK_FLAG,
+								h.Version(),
+								c.LocalPort(),
+								c.RemotePort(),
+								c.SND_NXT_SEQ_NB(),
+								c.RCV_CUR_SEQ_NB(),
+								c.RCV_WIN_SIZE(),
+								0  )
+						err = c.send(ack)
+					}
 					return
 			}
 	}
 	return fmt.Errorf("Unexpected packet of type %s in state %s.",h.TypeS(),c.StateS())
 }
 
+//write is an internally used method to create and send a data packet with the
+// given payload.
 func (c *Connection) write(data []byte) error {
-	//TODO: split up packages if length od data exceeds max PDU/SDU (fragmentation)
+	//TODO: split up packages if length of data exceeds max PDU/SDU (fragmentation)
 	return c.send(NewDataACK(	0,
 				c.lport,
 				c.rport,
@@ -593,13 +695,16 @@ func (c *Connection) write(data []byte) error {
 }
 
 
-// Send is an exported method to manualy send individual packets. It is intentded to be
+// Send is an exported method to manually send individual packets. It is intended to be
 // used for testing scenarios and debugging only.
 func (c *Connection) Send(h *Header) (err error) {
 	c.pkgout <- h
 	return nil
 }
 
+
+//readPackets is an internally used method to parse CAT_TP packets from
+// a sequence of bytes.
 func (c *Connection) readPackets(b []byte) (ret []*Header,consumed int,err error) {
 	rs, err := c.conn.Read(b)
 	if err != nil {
@@ -621,6 +726,9 @@ func (c *Connection) readPackets(b []byte) (ret []*Header,consumed int,err error
 	return
 }
 
+
+//Read reads bytes from a connection. The Buffer handler must have been used
+// to make this working.
 func (c *Connection) Read(b []byte) (co int, err error) {
 	co, err = c.inbuf.Read(b)
 	if co != 0 {
@@ -629,6 +737,8 @@ func (c *Connection) Read(b []byte) (co int, err error) {
 	return
 }
 
+
+// Write sends a sequence of bytes to the CAT_TP connection.
 func (c *Connection) Write(b []byte) (co int, err error) {
 	switch c.state {
 		case CLOSE,CLOSEWAIT,LISTEN:
@@ -639,6 +749,8 @@ func (c *Connection) Write(b []byte) (co int, err error) {
 	return
 }
 
+
+// readPacket reads a single packet from the underlying UDP socket.
 func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 	var buf [DefaultMaxPDUSize]byte
 	r,raddr,err := conn.ReadFromUDP(buf[:])
@@ -653,6 +765,8 @@ func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 	return ret,raddr,err
 }
 
+//packetReader is the server side loop to accpet new CAT_TP connections as well as
+// route incoming packets to the corresponding CAT_TP connections.
 func (srv *Server) packetReader(handler Handler) (err error) {
 	//Receive packets as long as client are existing and Close call has not yet been initiated.
 	srv.closewait = make(chan error,1)
@@ -688,6 +802,25 @@ func (srv *Server) packetReader(handler Handler) (err error) {
 	return
 }
 
+//Kill closes a client connection immediately.
+func (con *Connection) Kill() {
+	con.closeSocket()
+}
+
+//Kill closes server connection immediately.
+func (srv *Server) Kill(clients bool) {
+	//TODO: fix this dirty stuff.
+	srv.Close()
+	if clients {
+		for _,clt := range srv.clients {
+			clt.Kill()
+		}
+	}
+	srv.conn.Close()
+	srv.clients = nil
+}
+
+//listen creates a server and sets it in LISTEN state.
 func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	n := "udp"
 	srv = new(Server)
@@ -708,12 +841,15 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	return
 }
 
+//Listen starts a CAT_TP server asynchronously.
 func Listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	srv,err = listen(as,lport,handler)
 	go srv.packetReader(handler)
 	return
 }
 
+//Listen starts a CAT_TP server synchronously. It will block until the server 
+// is in state CLOSED.
 func KeepListening(as string, lport uint16, handler Handler) (err error) {
 	srv,err := listen(as,lport,handler)
 	if err !=nil {
