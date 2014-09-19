@@ -62,6 +62,8 @@ func NewSeqNo() uint16 {
 	return uint16(rand.Intn(0xffff))
 }
 
+func (p *Header) NeedsAck() bool { t:= p.Type(); return t== DATAACK || t == NUL || t == SYN }
+
 func (p *Header) SYN() bool { return (p.hdr[0] & SYN_FLAG) > 0 }
 
 func (p *Header) ACK() bool { return (p.hdr[0] & ACK_FLAG) > 0 }

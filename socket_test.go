@@ -2,17 +2,12 @@ package cattp
 
 import(
 	"testing"
-	"log"
 	"time"
 )
 
 
 //START a tracer for the entire session
 
-func EchoHandler (c *Connection, data []byte) {
-	r,_ := c.Write(data)
-	log.Printf("Echoed data: %s/%d",string(data),r)
-}
 
 func TestReceiveWindowExceed(t *testing.T) {
 	p := NewDataACK(0,1,9000,11,100,10,[]byte{})
@@ -56,17 +51,14 @@ func TestBlindConnect(t *testing.T) {
 	var receivedData []byte
 
 
-	srv,err := Listen("localhost:8770",9000)
+	srv,err := Listen("localhost:8770",9000,EchoHandler)
 	if err != nil {
 		t.Errorf("Could ot create listen server: %s",err)
 	}
 
-	go srv.Loop(EchoHandler)
-
-
 	time.Sleep(200 * time.Millisecond)
 
-	c,err  := Connect("localhost:8770",1,9000)
+	c,err  := ConnectWait("localhost:8770",1,9000,[]byte{},func(c *Connection,ps []*Header,data []byte) { receivedData = data })
 	if err != nil {
 		t.Errorf("Connection failed: %s",err)
 	}
@@ -75,9 +67,6 @@ func TestBlindConnect(t *testing.T) {
 	}
 
 	c.Write(testdata)
-	go c.Loop(func(c *Connection,data []byte) {
-		receivedData = data
-	})
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -96,26 +85,23 @@ func TestBlindConnect(t *testing.T) {
 		t.Errorf("Client Close failed: %s",err)
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	srv.Wait()
 	if len(srv.clients) != 0 {
 		t.Errorf("Client connection should have been closed. % open",len(srv.clients))
 	}
 }
 
 func TestNULPDU(t *testing.T) {
-	srv,err := Listen("localhost:8770",9000)
+	srv,err := Listen("localhost:8770",9000,EchoHandler)
 	if err != nil {
 		t.Errorf("Could ot create listen server: %s",err)
 	}
-	go srv.Loop(EchoHandler)
 
 
-	c,err := Connect("localhost:8770",1,9000)
+	c,err := ConnectWait("localhost:8770",1,9000,[]byte{},func(c *Connection,ps []*Header,data []byte) { })
 	if err != nil {
 		t.Errorf("Could not connect to server: %s",err)
 	}
-
-	go c.Loop(func(c *Connection,data []byte) { })
 
 	p := NewNUL(0,c.LocalPort(), c.RemotePort(),c.SND_NXT_SEQ_NB(), c.RCV_CUR_SEQ_NB(), c.receiveWindow.WindowSize())
 	c.Send(p)
@@ -128,7 +114,14 @@ func TestNULPDU(t *testing.T) {
 		t.Errorf("Did not receive ACK for NUL PDU.")
 	}
 
-	srv.Close()
 	c.Close()
+	srv.CloseWait()
+}
+
+func TestSYNRetransmit(t *testing.T) {
+	_,err := ConnectWait("localhost:8770",1,9000,[]byte{},LogHandler)
+	if err == nil {
+		t.Errorf("Connect should have failed.")
+	}
 }
 
