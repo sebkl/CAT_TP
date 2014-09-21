@@ -817,7 +817,7 @@ func (srv *Server) Kill(clients bool) {
 		}
 	}
 	srv.conn.Close()
-	srv.clients = nil
+	//srv.clients = nil
 }
 
 //listen creates a server and sets it in LISTEN state.
