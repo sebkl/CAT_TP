@@ -25,13 +25,18 @@ var RetransmitCount int = 2
 var RetransmitTimeout time.Duration = 2 * time.Second
 var CLOSEWAITTimeout time.Duration = 1 * time.Second
 
+//  Handler is the callback type for incoming data (on both sides)
+type Handler func (c *Connection,ps []*Header, data []byte)
+
 // Server represents a listen server (UDP) that accepts client connections.
 type Server struct {
 	closing bool
+	abort bool
 	conn *net.UDPConn
 	laddr *net.UDPAddr
 	lport uint16
 	clients map[string]*Connection
+	handler map[uint16]Handler
 	closewait chan error
 }
 
@@ -53,40 +58,10 @@ type ReceiveWindow struct {
 	lastHeader *Header
 }
 
-//  Handler is the callback type for incoming data (on both sides)
-type Handler func (c *Connection,ps []*Header, data []byte)
-
-// EchoHandler is a default handler that just prints the payload
-// to stdout.
-func EchoHandler (c *Connection,ps []*Header, data []byte) {
-	r,_ := c.Write(data)
-	log.Printf("Echoed data: %s/%d",string(data),r)
-}
-
-
-// LogHandler logs the packet structure to the logging framework.
-func LogHandler(c *Connection,ps []*Header, data []byte) {
-	log.Printf(">#%X\n",data)
-}
-
-
-// BufferHandler is the default handler that pushes all incoming
-// data to the corresponding buffer. This data can be read by using
-// the io.Reader interface accordingly.
-func BufferHandler (c *Connection,ps []*Header, data []byte) {
-	dl := len(data)
-	var err error
-	for wl := 0;err == nil && wl < dl; {
-		wl, err = c.inbuf.Write(data[wl:dl])
-	}
-}
-
-//IgnoreHandler ignoresincoming bytes
-func IgnoreHandler (c* Connection,ps []*Header, data []byte) {}
 
 //clientKey is an internally used function to identify connections on UDP level
-func clientKey(a *net.UDPAddr) string {
-	return a.String()
+func clientKey(a *net.UDPAddr, lp uint16)  string {
+	return fmt.Sprintf("%s@%d",a.String(),lp)
 }
 
 
@@ -204,7 +179,6 @@ type sendTimeout struct {
 	c <-chan time.Time
 	seqno uint16
 }
-
 
 // Connection represents a CAT_TP connection.
 type Connection struct {
@@ -418,7 +392,6 @@ func (con *Connection) loop() (err error){
 	return
 }
 
-
 //packetReader block as long as the connection is open and contiuesly reads
 // packets from the underlying UDP socket:
 func (con *Connection) packetReader() {
@@ -485,20 +458,18 @@ func (con *Connection) WaitForClose() error {
 	return <-con.closewait
 }
 
-
 //ConnectWait is a convenient function for a blocking connect.
 func ConnectWait(addr string, lport, rport uint16, id []byte, handlers ...Handler) (con *Connection, err error) {
 	con,err = Connect(addr,lport,rport,id,handlers...)
 	return con,con.WaitForConnect()
 }
 
-
 //closeSocket is an internally used method to actually close the underlying UDP
 // socket.
 func (c *Connection) closeSocket() (err error) {
 	log.Printf("Closing connection %s -> %s",c.raddr.String(),c.laddr.String())
 	if c.server != nil {
-		delete(c.server.clients,clientKey(c.raddr))
+		delete(c.server.clients,clientKey(c.raddr,c.lport))
 	}
 	c.state = CLOSE
 	err  = c.conn.Close()
@@ -530,6 +501,7 @@ func (c *Connection) Close() (err error) {
 
 // Close gracefully closes a listen socket.
 func (s *Server) Close() (err error) {
+	log.Printf("Closing listen socket.")
 	s.closing = true
 	return nil
 }
@@ -540,14 +512,12 @@ func (s *Server) Wait() error{
 	return <-s.closewait
 }
 
-
 // CloseWait is a convenience method for a blocking Close().
 func (s *Server) CloseWait() error{
 	err := s.Close()
 	s.Wait()
 	return err
 }
-
 
 // processPacket is an internally used method to process an incoming packet 
 // based on the current state. The state changes.
@@ -694,14 +664,12 @@ func (c *Connection) write(data []byte) error {
 				data) )
 }
 
-
 // Send is an exported method to manually send individual packets. It is intended to be
 // used for testing scenarios and debugging only.
 func (c *Connection) Send(h *Header) (err error) {
 	c.pkgout <- h
 	return nil
 }
-
 
 //readPackets is an internally used method to parse CAT_TP packets from
 // a sequence of bytes.
@@ -726,7 +694,6 @@ func (c *Connection) readPackets(b []byte) (ret []*Header,consumed int,err error
 	return
 }
 
-
 //Read reads bytes from a connection. The Buffer handler must have been used
 // to make this working.
 func (c *Connection) Read(b []byte) (co int, err error) {
@@ -736,7 +703,6 @@ func (c *Connection) Read(b []byte) (co int, err error) {
 	}
 	return
 }
-
 
 // Write sends a sequence of bytes to the CAT_TP connection.
 func (c *Connection) Write(b []byte) (co int, err error) {
@@ -748,7 +714,6 @@ func (c *Connection) Write(b []byte) (co int, err error) {
 	}
 	return
 }
-
 
 // readPacket reads a single packet from the underlying UDP socket.
 func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
@@ -767,27 +732,36 @@ func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 
 //packetReader is the server side loop to accpet new CAT_TP connections as well as
 // route incoming packets to the corresponding CAT_TP connections.
-func (srv *Server) packetReader(handler Handler) (err error) {
+func (srv *Server) packetReader() (err error) {
 	//Receive packets as long as client are existing and Close call has not yet been initiated.
 	srv.closewait = make(chan error,1)
-	for ;!srv.closing || len(srv.clients) > 0; {
+	for ;(!srv.closing || len(srv.clients) > 0) && !srv.abort; {
 		p,raddr,err := readPacket(srv.conn)
 		if err != nil {
+			log.Printf("Error reading packet: %s",err)
 			continue
 		}
 
-		var cc *Connection
+		var handler Handler
 		var ok bool
-		if cc,ok = srv.clients[clientKey(raddr)]; !ok {
+		var cc *Connection
+
+		if handler,ok = srv.handler[p.DestPort()]; !ok {
+			log.Printf("Unassigned port: %d",p.DestPort())
+			continue
+		}
+
+		if cc,ok = srv.clients[clientKey(raddr,p.DestPort())]; !ok {
 			//Connection does not yet exist
 			cc = NewConnection(srv.lport,p.SrcPort())
 			cc.server = srv
-			cc.handler = handler
+			cc.handler = handler //looked up above
 			cc.raddr = raddr
 			cc.laddr = srv.laddr
 			cc.conn = srv.conn
 			cc.state = LISTEN
-			srv.clients[clientKey(raddr)] = cc
+			cc.lport = p.DestPort()
+			srv.clients[clientKey(raddr,p.DestPort())] = cc
 			go func(cc *Connection) {cc.loop()}(cc) // start own routine per connection.
 		}
 		cc.pkgin <- p // send packet to the connection inbound queue/channel
@@ -811,6 +785,7 @@ func (con *Connection) Kill() {
 func (srv *Server) Kill(clients bool) {
 	//TODO: fix this dirty stuff.
 	srv.Close()
+	srv.abort = true
 	if clients {
 		for _,clt := range srv.clients {
 			clt.Kill()
@@ -820,10 +795,24 @@ func (srv *Server) Kill(clients bool) {
 	//srv.clients = nil
 }
 
+func newServer() (srv *Server) {
+	srv = new(Server)
+	srv.handler = make(map[uint16]Handler)
+	return srv
+}
+
+func (srv *Server) SetListener(lport uint16, handler Handler) *Server {
+	if _,exists := srv.handler[lport]; exists {
+		log.Printf("Overwriting port listener: %d",lport)
+	}
+	srv.handler[lport] = handler
+	return srv
+}
+
 //listen creates a server and sets it in LISTEN state.
 func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	n := "udp"
-	srv = new(Server)
+	srv = newServer()
 
 	laddr, err := net.ResolveUDPAddr(n,as)
 	if err != nil {
@@ -836,7 +825,8 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 		return
 	}
 	srv.conn = conn
-	srv.lport = lport
+	//TODO set deadline !!!!
+	srv.SetListener(lport,handler)
 	srv.clients = make(map[string]*Connection)
 	return
 }
@@ -844,7 +834,7 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 //Listen starts a CAT_TP server asynchronously.
 func Listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	srv,err = listen(as,lport,handler)
-	go srv.packetReader(handler)
+	go srv.packetReader()
 	return
 }
 
@@ -855,5 +845,5 @@ func KeepListening(as string, lport uint16, handler Handler) (err error) {
 	if err !=nil {
 		return
 	}
-	return srv.packetReader(handler)
+	return srv.packetReader()
 }

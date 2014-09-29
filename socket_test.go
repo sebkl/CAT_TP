@@ -135,7 +135,7 @@ func TestDATACKRetransmit(t *testing.T) {
 		t.Errorf("Could ot create listen server: %s",err)
 	}
 
-	c,err:= ConnectWait("localhost:8770",1,900,[]byte{},LogHandler)
+	c,err:= ConnectWait("localhost:8770",1,9000,[]byte{},LogHandler)
 
 	srv.Kill(false)
 	c.Write([]byte{'a','b'})
@@ -179,4 +179,17 @@ func TestNULEAK(t *testing.T) {
 
 	c.Close()
 	srv.CloseWait()
+}
+
+func TestWrongPort(t *testing.T) {
+	srv,err := Listen("localhost:8770",9000,EchoHandler)
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+	_,err = ConnectWait("localhost:8770",1,9001,[]byte{},LogHandler)
+	if err == nil {
+		t.Errorf("Connection should not have been established.")
+	}
+
+	srv.Kill(false)
 }

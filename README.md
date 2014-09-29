@@ -11,7 +11,6 @@ Is available at [at godoc.org](http://godoc.org/github.com/sebkl/CAT_TP).
 
 ## TODO
 
- * Implement example.
  * Implement CAT\_TP port allocation. Currently source and destination ports must be specified explicitly.
  * Add callback hooks for connection states.
  * Implement tcpdump like command line util
