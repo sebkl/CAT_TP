@@ -6,6 +6,7 @@ import (
 	"log"
 	"fmt"
 	"time"
+	"strings"
 )
 
 //Connection states
@@ -81,7 +82,7 @@ func NewReceiveWindow(inorder uint16, size uint16) *ReceiveWindow {
 func (s *SendWindow) Add(h *Header) *sendTimeout {
 	sn := h.SeqNo()
 	if sn >= s.newest {
-		if sn - s.newest > 1 {
+		if (sn - s.newest) > 1 && s.newest != 0 {
 			log.Printf("Warning: Skipping Seqno.")
 		}
 		s.newest = sn
@@ -736,9 +737,13 @@ func (srv *Server) packetReader() (err error) {
 	//Receive packets as long as client are existing and Close call has not yet been initiated.
 	srv.closewait = make(chan error,1)
 	for ;(!srv.closing || len(srv.clients) > 0) && !srv.abort; {
+		srv.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		p,raddr,err := readPacket(srv.conn)
+
 		if err != nil {
-			log.Printf("Error reading packet: %s",err)
+			if !strings.HasSuffix(err.Error(),"timeout") {
+				log.Printf("Error reading packet: %s",err)
+			}
 			continue
 		}
 
@@ -825,7 +830,6 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 		return
 	}
 	srv.conn = conn
-	//TODO set deadline !!!!
 	srv.SetListener(lport,handler)
 	srv.clients = make(map[string]*Connection)
 	return

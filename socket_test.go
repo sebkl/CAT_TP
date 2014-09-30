@@ -6,8 +6,10 @@ import(
 )
 
 
-//START a tracer for the entire session
-
+func TestSetup(t *testing.T) {
+	RetransmitTimeout = 100 * time.Millisecond
+	//TODO: START a tracer for the entire session
+}
 
 func TestReceiveWindowExceed(t *testing.T) {
 	p := NewDataACK(0,1,9000,11,100,10,[]byte{})
@@ -186,10 +188,61 @@ func TestWrongPort(t *testing.T) {
 	if err != nil {
 		t.Errorf("Could ot create listen server: %s",err)
 	}
-	_,err = ConnectWait("localhost:8770",1,9001,[]byte{},LogHandler)
-	if err == nil {
+
+	if _,err = ConnectWait("localhost:8770",1,9001,[]byte{},LogHandler); err == nil {
 		t.Errorf("Connection should not have been established.")
 	}
 
-	srv.Kill(false)
+	if c,err := ConnectWait("localhost:8770",1,9000,[]byte{},LogHandler); err != nil {
+		t.Errorf("Connection should have been established.")
+	} else {
+		c.Close()
+	}
+
+	srv.CloseWait()
+}
+
+
+func TestMultipleServerPorts(t *testing.T) {
+	var buf0,buf1 []byte
+	srv,err := Listen("localhost:8770",9000,func (c *Connection,ps []*Header, data []byte) {
+		c.Write([]byte("9000"))
+	})
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+	srv.SetListener(9001, func (c *Connection, ps []*Header, data []byte) {
+		c.Write([]byte("9001"))
+	})
+
+	c1,err := ConnectWait("localhost:8770",1,9001,[]byte{}, func (co *Connection, ps[]*Header, data []byte) {
+		buf1 = data
+		co.Close()
+	})
+	if err != nil{
+		t.Errorf("Faild to connect: %s",err)
+	}
+
+	c0,err := ConnectWait("localhost:8770",1,9000,[]byte{}, func (co *Connection, ps[]*Header, data []byte) {
+		buf0 = data
+		co.Close()
+	});
+	if err != nil {
+		t.Errorf("Faild to connect: %s",err)
+	}
+
+	c0.Write([]byte("X"))
+	c1.Write([]byte("X"))
+
+	time.Sleep(100 * time.Millisecond)
+
+	if string(buf0) != "9000" {
+		t.Errorf("Failed to connect to correct port: %s/%s",string(buf0),"9000")
+	}
+
+	if string(buf1) != "9001" {
+		t.Errorf("Failed to connect to correct port: %s/%s",string(buf0),"9001")
+	}
+
+	srv.CloseWait()
 }
