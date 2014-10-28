@@ -29,6 +29,9 @@ var CLOSEWAITTimeout time.Duration = 1 * time.Second
 //  Handler is the callback type for incoming data (on both sides)
 type Handler func (c *Connection,ps []*Header, data []byte)
 
+// ConnectionHandler is the callback type for an incoming connection.
+type ConnectionHandler func (c *Connection)
+
 // Server represents a listen server (UDP) that accepts client connections.
 type Server struct {
 	closing bool
@@ -39,6 +42,7 @@ type Server struct {
 	clients map[string]*Connection
 	handler map[uint16]Handler
 	closewait chan error
+	conHandler ConnectionHandler
 }
 
 // SendWindow keeps track of which sent packets have been acknowledged or not.
@@ -50,7 +54,6 @@ type SendWindow  struct {
 	rtcount int /* retransmit count */
 }
 
-
 // ReceiveWindow keeps track of the incoming sequence. Out of sequence packets 
 // will be stored and only returned in the correct sequence.
 type ReceiveWindow struct {
@@ -58,7 +61,6 @@ type ReceiveWindow struct {
 	last uint16 /* last in order */
 	lastHeader *Header
 }
-
 
 //clientKey is an internally used function to identify connections on UDP level
 func clientKey(a *net.UDPAddr, lp uint16)  string {
@@ -184,6 +186,7 @@ type sendTimeout struct {
 // Connection represents a CAT_TP connection.
 type Connection struct {
 	syn *Header
+	identification []byte
 	server *Server
 	state byte
 	conn *net.UDPConn
@@ -208,6 +211,8 @@ type Connection struct {
 	// Generated packets from Write call which will be stupidly forwarded to a private send method
 	dataout chan []byte
 }
+
+func (c *Connection) Identification() []byte { return c.identification }
 
 func (c *Connection) LocalPort() uint16 { return c.lport }
 
@@ -471,9 +476,11 @@ func (c *Connection) closeSocket() (err error) {
 	log.Printf("Closing connection %s -> %s",c.raddr.String(),c.laddr.String())
 	if c.server != nil {
 		delete(c.server.clients,clientKey(c.raddr,c.lport))
+	} else {
+		//Only shutdown connection if we are the client.
+		err  = c.conn.Close()
 	}
 	c.state = CLOSE
-	err  = c.conn.Close()
 	return
 }
 
@@ -538,6 +545,7 @@ func (c *Connection) processPacket(h *Header) (err error) {
 				c.syn = sa
 				err = c.send(sa)
 				c.state = SYNRCVD
+				c.identification = h.Identification()
 				return err
 			}
 		case SYNSENT:
@@ -584,6 +592,12 @@ func (c *Connection) processPacket(h *Header) (err error) {
 						DefaultWindowSize) // Allocate the receive Window for server.
 					//no packet to be sent here.
 					c.state = OPEN
+
+					//Do the freakin incoming connection callback.
+					if c.server != nil && c.server.conHandler != nil {
+						// Perform incoming connection callback
+						c.server.conHandler(c)
+					}
 					return
 				case RST:
 					c.closeSocket()
@@ -721,6 +735,7 @@ func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 	var buf [DefaultMaxPDUSize]byte
 	r,raddr,err := conn.ReadFromUDP(buf[:])
 	if err != nil {
+		//log.Printf("Could not read udp packet: %s",err)
 		return
 	}
 	ret,err = NewHeader(buf[:r])
@@ -742,7 +757,7 @@ func (srv *Server) packetReader() (err error) {
 
 		if err != nil {
 			if !strings.HasSuffix(err.Error(),"timeout") {
-				log.Printf("Error reading packet: %s",err)
+				log.Printf("Error reading packet: %s (%t,%d,%t)",err,srv.closing,len(srv.clients),srv.abort)
 			}
 			continue
 		}
@@ -776,8 +791,9 @@ func (srv *Server) packetReader() (err error) {
 		}
 
 	}
-	log.Printf("Listen server %s closed.",srv.laddr.String())
 	srv.closewait <- err
+	srv.conn.Close() //TODO: Verify if this makes sense here.
+	log.Printf("Listen server %s closed.",srv.laddr.String())
 	return
 }
 
@@ -796,6 +812,7 @@ func (srv *Server) Kill(clients bool) {
 			clt.Kill()
 		}
 	}
+	log.Printf("Closing UDP socket for listen server.")
 	srv.conn.Close()
 	//srv.clients = nil
 }
@@ -826,7 +843,8 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	srv.laddr = laddr
 
 	conn,err := net.ListenUDP(n,laddr)
-	if err != nil {
+	if err != nil || conn == nil{
+		log.Fatalf("Server socket init failed: %s",err)
 		return
 	}
 	srv.conn = conn
@@ -838,16 +856,23 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 //Listen starts a CAT_TP server asynchronously.
 func Listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 	srv,err = listen(as,lport,handler)
+	if err != nil {
+		return
+	}
 	go srv.packetReader()
 	return
 }
 
 //Listen starts a CAT_TP server synchronously. It will block until the server 
 // is in state CLOSED.
-func KeepListening(as string, lport uint16, handler Handler) (err error) {
+func KeepListening(as string, lport uint16, handler Handler, conHandler ...ConnectionHandler) (err error) {
 	srv,err := listen(as,lport,handler)
 	if err !=nil {
 		return
+	}
+
+	if len(conHandler) > 0 {
+		srv.conHandler = conHandler[0]
 	}
 	return srv.packetReader()
 }

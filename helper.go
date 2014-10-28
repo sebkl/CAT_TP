@@ -45,3 +45,12 @@ func BufferHandler (c *Connection,ps []*Header, data []byte) {
 //IgnoreHandler ignoresincoming bytes
 func IgnoreHandler (c* Connection,ps []*Header, data []byte) {}
 
+//switches the byte array per nibble (like big to little endian just with nibbles)
+func Nibble( data []byte) []byte {
+	ret := make([]byte,len(data))
+	for i,b := range data {
+		ret[i] = byte(b << 4) | byte(b >> 4)
+	}
+	return ret
+}
+
