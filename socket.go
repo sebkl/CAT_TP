@@ -3,7 +3,6 @@ package cattp
 import (
 	"net"
 	"bytes"
-	"log"
 	"fmt"
 	"time"
 	"strings"
@@ -85,11 +84,11 @@ func (s *SendWindow) Add(h *Header) *sendTimeout {
 	sn := h.SeqNo()
 	if sn >= s.newest {
 		if (sn - s.newest) > 1 && s.newest != 0 {
-			log.Printf("Warning: Skipping Seqno.")
+			Log.Printf("Warning: Skipping Seqno.")
 		}
 		s.newest = sn
 	} else {
-		log.Printf("Warning: Sending obsolete seqno.")
+		Log.Printf("Warning: Sending obsolete seqno.")
 	}
 	s.buf[h.SeqNo()] = h
 	return &sendTimeout{seqno: h.SeqNo(), c: time.After(RetransmitTimeout) }
@@ -299,8 +298,8 @@ func (c *Connection) send(p *Header) (err error) {
 		p.SetEAK(c.receiveWindow.oosSeqNo())
 	}
 
-	log.Printf("%s Sending %s packet to: %s",c.StateS(),p.TypeS(),c.raddr.String())
-	log.Printf(">%s",p.String())
+	Log.Printf("%s Sending %s packet to: %s",c.StateS(),p.TypeS(),c.raddr.String())
+	Log.Printf(">%s",p.String())
 	if c.server != nil {
 		w,err = c.conn.WriteToUDP(p.raw,c.raddr)
 	} else {
@@ -314,7 +313,7 @@ func (c *Connection) send(p *Header) (err error) {
 
 	if w != len(p.raw) {
 		//TODO: make loop here
-		log.Printf("Could not write all bytes to UDP datagram: %d/%d",w,len(p.raw))
+		Log.Printf("Could not write all bytes to UDP datagram: %d/%d",w,len(p.raw))
 	}
 	return
 }
@@ -389,7 +388,7 @@ func (con *Connection) loop() (err error){
 				}
 		}
 		if err != nil {
-			log.Printf("Error: %s",err)
+			Log.Printf("Error: %s",err)
 		}
 	}
 
@@ -404,12 +403,12 @@ func (con *Connection) packetReader() {
 	for ;con.state != CLOSE; {
 		p,_,err := readPacket(con.conn)
 		if err != nil && con.state != CLOSE { // connection could be closed in the meantime
-			log.Printf("Error reading packet %s in state %s",err,con.StateS())
+			Log.Printf("Error reading packet %s in state %s",err,con.StateS())
 			continue
 		}
 		con.pkgin <- p
 	}
-	log.Printf("Client connection to %s closed.",con.raddr.String())
+	Log.Printf("Client connection to %s closed.",con.raddr.String())
 }
 
 //Connect tries to connect to a remote CAT_TP server. It is not blocking.
@@ -473,7 +472,7 @@ func ConnectWait(addr string, lport, rport uint16, id []byte, handlers ...Handle
 //closeSocket is an internally used method to actually close the underlying UDP
 // socket.
 func (c *Connection) closeSocket() (err error) {
-	log.Printf("Closing connection %s -> %s",c.raddr.String(),c.laddr.String())
+	Log.Printf("Closing connection %s -> %s",c.raddr.String(),c.laddr.String())
 	if c.server != nil {
 		delete(c.server.clients,clientKey(c.raddr,c.lport))
 	} else {
@@ -509,7 +508,7 @@ func (c *Connection) Close() (err error) {
 
 // Close gracefully closes a listen socket.
 func (s *Server) Close() (err error) {
-	log.Printf("Closing listen socket.")
+	Log.Printf("Closing listen socket.")
 	s.closing = true
 	return nil
 }
@@ -530,10 +529,10 @@ func (s *Server) CloseWait() error{
 // processPacket is an internally used method to process an incoming packet 
 // based on the current state. The state changes.
 func (c *Connection) processPacket(h *Header) (err error) {
-	log.Printf("%s Processing %s packet.",c.StateS(),h.TypeS())
+	Log.Printf("%s Processing %s packet.",c.StateS(),h.TypeS())
 	switch c.state {
 		case CLOSE:
-			log.Printf("Ignoring packet. In CLOSED state.")
+			Log.Printf("Ignoring packet. In CLOSED state.")
 			// nothing hapens here. Only open call expected.
 		case CLOSEWAIT:
 			// TODO: Check what happens with packets here ? discard ?
@@ -569,7 +568,7 @@ func (c *Connection) processPacket(h *Header) (err error) {
 					err = c.send(ack)
 					// To OPEN
 					c.state = OPEN
-					log.Printf("Client connection to %s established.",c.raddr.String())
+					Log.Printf("Client connection to %s established.",c.raddr.String())
 					c.connectwait <- err
 					return err
 				case RST:
@@ -735,14 +734,14 @@ func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 	var buf [DefaultMaxPDUSize]byte
 	r,raddr,err := conn.ReadFromUDP(buf[:])
 	if err != nil {
-		//log.Printf("Could not read udp packet: %s",err)
+		//Log.Printf("Could not read udp packet: %s",err)
 		return
 	}
 	ret,err = NewHeader(buf[:r])
 	if err != nil {
-		log.Printf("Error: %s\n%x",err,buf)
+		Log.Printf("Error: %s\n%x",err,buf)
 	}
-	log.Printf("<%s",ret.String())
+	Log.Printf("<%s",ret.String())
 	return ret,raddr,err
 }
 
@@ -757,7 +756,7 @@ func (srv *Server) packetReader() (err error) {
 
 		if err != nil {
 			if !strings.HasSuffix(err.Error(),"timeout") {
-				log.Printf("Error reading packet: %s (%t,%d,%t)",err,srv.closing,len(srv.clients),srv.abort)
+				Log.Printf("Error reading packet: %s (%t,%d,%t)",err,srv.closing,len(srv.clients),srv.abort)
 			}
 			continue
 		}
@@ -767,7 +766,7 @@ func (srv *Server) packetReader() (err error) {
 		var cc *Connection
 
 		if handler,ok = srv.handler[p.DestPort()]; !ok {
-			log.Printf("Unassigned port: %d",p.DestPort())
+			Log.Printf("Unassigned port: %d",p.DestPort())
 			continue
 		}
 
@@ -787,13 +786,13 @@ func (srv *Server) packetReader() (err error) {
 		cc.pkgin <- p // send packet to the connection inbound queue/channel
 
 		if err != nil {
-			log.Printf("Error: %s",err)
+			Log.Printf("Error: %s",err)
 		}
 
 	}
 	srv.closewait <- err
 	srv.conn.Close() //TODO: Verify if this makes sense here.
-	log.Printf("Listen server %s closed.",srv.laddr.String())
+	Log.Printf("Listen server %s closed.",srv.laddr.String())
 	return
 }
 
@@ -812,7 +811,7 @@ func (srv *Server) Kill(clients bool) {
 			clt.Kill()
 		}
 	}
-	log.Printf("Closing UDP socket for listen server.")
+	Log.Printf("Closing UDP socket for listen server.")
 	srv.conn.Close()
 	//srv.clients = nil
 }
@@ -825,7 +824,7 @@ func newServer() (srv *Server) {
 
 func (srv *Server) SetListener(lport uint16, handler Handler) *Server {
 	if _,exists := srv.handler[lport]; exists {
-		log.Printf("Overwriting port listener: %d",lport)
+		Log.Printf("Overwriting port listener: %d",lport)
 	}
 	srv.handler[lport] = handler
 	return srv
@@ -844,7 +843,7 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 
 	conn,err := net.ListenUDP(n,laddr)
 	if err != nil || conn == nil{
-		log.Fatalf("Server socket init failed: %s",err)
+		Log.Fatalf("Server socket init failed: %s",err)
 		return
 	}
 	srv.conn = conn

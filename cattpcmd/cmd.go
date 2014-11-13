@@ -23,6 +23,7 @@ type config struct {
 	clientCattpPort int
 	identification string
 	nibble bool
+	log bool
 }
 
 var cfg config
@@ -37,6 +38,7 @@ func init() {
 	flag.StringVar(&cfg.identification, "id", "", "identification")
 	flag.BoolVar(&cfg.nibble, "n", false, "nibbled identification")
 	flag.IntVar(&cfg.clientCattpPort, "p",1, "client cattp port")
+	flag.BoolVar(&cfg.log,"v",false,"verbose logging")
 }
 
 
@@ -100,6 +102,11 @@ func main() {
 	var handle *pcap.Pcap
 	var err error
 
+	// In case of logging, implicitly set log flag
+	if cfg.log || cfg.command == "log" {
+		Log = log.New(os.Stderr,"CATTP",log.Flags())
+	}
+
 	switch cfg.command {
 		case "log":
 			// Set filter command for libpcap
@@ -108,7 +115,7 @@ func main() {
 			}
 
 			if len(cfg.device) > 0 {
-				log.Printf("Opening device: %s",cfg.device)
+				Log.Printf("Opening device: %s",cfg.device)
 				handle,err = pcap.OpenLive(cfg.device,int32(cfg.snaplen),true,1000)
 			} else if len(cfg.infile) > 0 {
 				handle,err = pcap.OpenOffline(cfg.infile)
@@ -121,7 +128,7 @@ func main() {
 			}
 
 			if err != nil {
-				log.Fatalf("Failed to open source: %s",err)
+				Log.Fatalf("Failed to open source: %s",err)
 			}
 
 			for x := handle.Next();;x = handle.Next() {
@@ -129,7 +136,7 @@ func main() {
 					func (p *pcap.Packet) {
 						defer func() {
 							if r := recover(); r != nil {
-								log.Printf("Could not decode packet: %s \n %s",r, p)
+								Log.Printf("Could not decode packet: %s \n %s",r, p)
 							}
 						}()
 
@@ -159,10 +166,10 @@ func main() {
 				})
 
 			if err != nil {
-				log.Fatalf("Connect failed: %s",err)
+				Log.Fatalf("Connect failed: %s",err)
 			}
 
-			log.Fatalf("Sending Data failed: %s",forward(os.Stdin,con))
+			Log.Fatalf("Sending Data failed: %s",forward(os.Stdin,con))
 
 		case "listen":
 			if len(args) < 3 {
@@ -177,10 +184,10 @@ func main() {
 					fmt.Printf("%s>\n%s",c.RemoteAddr().String(),hex.Dump(data))
 				},
 				func(c *Connection) {
-					log.Printf("Incoming Connection from %s with identification: %s",c.RemoteAddr().String(),string(c.Identification()))
+					Log.Printf("Incoming Connection from %s with identification: %s",c.RemoteAddr().String(),string(c.Identification()))
 				})
 
-			log.Fatalf("Server stopped: %s",err)
+			Log.Fatalf("Server stopped: %s",err)
 		default:
 			printUsage(fmt.Sprintf("Unknown command: '%s'",cfg.command))
 	}

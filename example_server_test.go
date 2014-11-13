@@ -15,7 +15,7 @@ func ExampleServer() {
 		})
 
 	if err != nil {
-		log.Fatalf("Could not create listen server: %s",err)
+		Log.Fatalf("Could not create listen server: %s",err)
 	}
 
 	client,err:= ConnectWait("localhost:8770",1,9000,[]byte{},
@@ -24,7 +24,7 @@ func ExampleServer() {
 		})
 
 	if err != nil {
-		log.Fatalf("Could not connect to server: %s",err)
+		Log.Fatalf("Could not connect to server: %s",err)
 	}
 
 	client.Write([]byte("Hello World!"))

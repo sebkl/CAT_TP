@@ -3,7 +3,13 @@ package cattp
 import (
 	"log"
 	"fmt"
+	"io/ioutil"
 )
+
+const (
+	LOGPREFIX = "CATTP"
+)
+
 
 type Dumper interface {
 	Dump(data []byte) string
@@ -16,18 +22,23 @@ func (h HexDumper) Dump(data []byte) string {
 }
 
 var OctetDumper Dumper = HexDumper{}
+var Log *log.Logger
+
+//Initialize the helper module
+func init() {
+	Log = log.New(ioutil.Discard,LOGPREFIX,log.Flags())
+}
 
 // EchoHandler is a default handler that just prints the payload
 // to stdout.
 func EchoHandler (c *Connection,ps []*Header, data []byte) {
 	r,_ := c.Write(data)
-	log.Printf("Echoed data: %s/%d",string(data),r)
+	Log.Printf("Echoed data: %s/%d",string(data),r)
 }
-
 
 // LogHandler logs the packet structure to the logging framework.
 func LogHandler(c *Connection,ps []*Header, data []byte) {
-	log.Printf(">#%X\n",data)
+	Log.Printf(">#%X\n",data)
 }
 
 

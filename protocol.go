@@ -326,7 +326,7 @@ func NewHeader(raw []byte) (ret *Header,err error) {
 			//TODO: deal with data
 		default:
 			//TODO: comment in once all other types have been implemented.
-			//log.Printf("E|Unknown pdu type: %d",ret.Type())
+			//Log.Printf("E|Unknown pdu type: %d",ret.Type())
 
 	}
 	if c != int(ret.HeaderLen()) {
