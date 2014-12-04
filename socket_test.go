@@ -3,8 +3,13 @@ package cattp
 import(
 	"testing"
 	"time"
+	"os"
+	"log"
 )
 
+func init() {
+	Log = log.New(os.Stdout,LOGPREFIX,log.Flags())
+}
 
 func TestSetup(t *testing.T) {
 	RetransmitTimeout = 100 * time.Millisecond
@@ -18,7 +23,6 @@ func TestReceiveWindowExceed(t *testing.T) {
 	if err == nil {// Should be error here
 		t.Errorf("Window should be exceeded here.")
 	}
-
 }
 
 func TestReceiveWindowOutOfOrder(t *testing.T) {
@@ -88,8 +92,8 @@ func TestBlindConnect(t *testing.T) {
 	}
 
 	srv.Wait()
-	if len(srv.clients) != 0 {
-		t.Errorf("Client connection should have been closed. % open",len(srv.clients))
+	if srv.countClients() != 0 {
+		t.Errorf("Client connection should have been closed. % open",srv.countClients())
 	}
 }
 
@@ -183,6 +187,163 @@ func TestNULEAK(t *testing.T) {
 	srv.CloseWait()
 }
 
+func TestEAKsAndWindowSize(t *testing.T) {
+	l := 34
+	srv,err := Listen("localhost:8770",9000,func(c *Connection, h []*Header, data []byte) { }, SocketParameters{RECEIVEWINDOW_SIZE: uint16(l+1)})
+
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+
+	c,err:= ConnectWait("localhost:8770",1,9000,[]byte{},func(c *Connection, h []*Header, data []byte) { },SocketParameters{RECEIVEWINDOW_SIZE: uint16(l+1)})
+
+	//Simulate lost packet to receive eaks.
+	//c.sendWindow.last++
+	c.sendWindow.newest++
+
+	//Send five packets and expect eaks
+	for i:=0;i<l;i++ {
+		c.Write([]byte{'1'})
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	oos := int(c.sendWindow.newest - c.sendWindow.last - 1)
+
+	if oos != l {
+		t.Errorf("Invalid count of EAKs received: %d/%d",oos,l)
+	}
+
+	c.Close()
+	srv.CloseWait()
+}
+
+// Test identification field.
+func TestIdentification(t *testing.T) {
+	var client string
+	var server string
+
+	srv,err := Listen("localhost:8770",9000,func(c *Connection, h []*Header, data []byte) {
+		client = string(c.Identification())
+		c.Write(data)
+	}, SocketParameters{IDENTIFICATION: []byte("SERVER")})
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+
+	c,err:= ConnectWait("localhost:8770",1,9000,[]byte("CLIENT"),func(con *Connection, h []*Header, data []byte) {
+		server = string(con.Identification())
+	})
+
+	c.Write([]byte("Hello World!"))
+
+	time.Sleep(100 * time.Millisecond)
+
+	if client != "CLIENT" {
+		t.Errorf("Client identification incorrect: %s",client)
+	}
+
+	if server != "SERVER" {
+		t.Errorf("Server identification incorrect: %s", server)
+	}
+	c.Close()
+	srv.CloseWait()
+}
+
+// Test long identification field.
+func TestLongIdentification(t *testing.T) {
+	sid := ""
+	for i:=0;i < 50; i++ {
+		sid = sid + "0123456789"
+	}
+
+	srv,err := Listen("localhost:8770",9000,func(c *Connection, h []*Header, data []byte) {
+		c.Write(data)
+	}, SocketParameters{IDENTIFICATION: []byte(sid)})
+	if err != nil {
+		t.Errorf("Could not create listen server: %s",err)
+	}
+
+
+	c,err:= ConnectWait("localhost:8770",1,9000,[]byte{},func(c *Connection, h []*Header, data []byte) {})
+	if err != nil {
+		t.Errorf("Could not connect to server: %s",err)
+	}
+	c.Write([]byte("Hello World!"))
+	time.Sleep(100 * time.Millisecond)
+
+	if string(c.Identification()) != sid[:MaxIdenficationLen] {
+		t.Errorf("Identification incorrect: %d/%d",len(c.Identification()),len(sid))
+	}
+
+	c.Close()
+	srv.CloseWait()
+}
+
+func TestICCID(t *testing.T) {
+	var riccid string
+	srv,err := Listen("localhost:8770",9000,func(c *Connection, h []*Header, data []byte) {
+		riccid = string(Nibble(c.Identification()))
+		c.Write(data)
+	})
+	if err != nil {
+		t.Errorf("Could not connect to server: %s",err)
+	}
+
+	iccid := "8934FFFFFFFFFFFFFFFF"
+
+	c,err:= ConnectWait("localhost:8770",1,9000,Nibble([]byte(iccid)),func(c *Connection, h []*Header, data []byte) {})
+	c.Write([]byte{'0'})
+	time.Sleep(100 * time.Millisecond)
+
+	if riccid != iccid {
+		t.Errorf("ICCID incorrect: %s/%s",riccid,iccid)
+	}
+
+	c.Close()
+	srv.CloseWait()
+}
+func TestLargePacket(t *testing.T) {
+	mes := ""
+	for i:=0; i < 200;i++ {
+		mes = mes + "0123456789"
+	}
+
+	ret := ""
+
+	srv,err := Listen("localhost:8770",9000,func(c *Connection, h []*Header, data []byte) {
+		c.Write(data)
+	})
+
+	if err != nil {
+		t.Errorf("Could not connect to server: %s",err)
+	}
+
+
+	c,err:= ConnectWait("localhost:8770",1,9000,[]byte{},func(c *Connection, h []*Header, data []byte) {
+		ret = ret + string(data)
+	})
+
+	c.Write([]byte(mes))
+	time.Sleep(100 * time.Millisecond)
+
+	if mes != ret {
+		t.Errorf("Sending big packet of len %d failed. %d/%d",len(mes),len(ret),len(mes))
+	}
+
+	c.Close()
+	srv.CloseWait()
+}
+
+// As Long as no client is connected, server socket should be closeable immediately.
+func TestOpenAndClose(t *testing.T) {
+
+	srv,err := Listen("localhost:8770",9000,func(c *Connection, h []*Header, data []byte) { })
+	if err != nil {
+		t.Errorf("Could ot create listen server: %s",err)
+	}
+	srv.CloseWait()
+}
+
 func TestWrongPort(t *testing.T) {
 	srv,err := Listen("localhost:8770",9000,EchoHandler)
 	if err != nil {
@@ -228,7 +389,7 @@ func TestMultipleServerPorts(t *testing.T) {
 		co.Close()
 	});
 	if err != nil {
-		t.Errorf("Faild to connect: %s",err)
+		t.Errorf("Failed to connect: %s",err)
 	}
 
 	c0.Write([]byte("X"))

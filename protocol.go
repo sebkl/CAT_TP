@@ -11,7 +11,6 @@ import(
 	"strconv"
 )
 
-
 const ( // PDU TYPES
 	UNK	= iota
 	SYN	= iota
@@ -22,7 +21,6 @@ const ( // PDU TYPES
 	NUL	= iota
 	EAK	= iota
 )
-
 
 const ( // PDU Flags
 	FLAG_MASK = 0xFC
@@ -41,10 +39,13 @@ const ( // Header Constants
 
 const ( // Default Values
 	DefaultMaxPDUSize = 1024
-	DefaultMaxSDUSize = 3276
+	DefaultMaxSDUSize = 512
 	DefaultSrcPort = 1
 	DefaultDestPort = 9000
 	DefaultWindowSize = 10
+	MaxHeaderLen = 255
+	MaxIdenficationLen = MaxHeaderLen - (BASE_HLEN + 4 + 1)
+	MaxEAKs = 118 /*(MaxHederLen - (BASE_HLEN))/2 */
 )
 
 type Header struct {
@@ -127,7 +128,7 @@ func (p *Header) TypeS() (ret string) {
 
 func (p *Header) Version() byte { return byte(p.hdr[0] & 0x03) }
 
-func (p *Header) HeaderLen() byte { return byte(p.hdr[3]) }
+func (p *Header) HeaderLen() uint8 { return uint8(p.hdr[3]) }
 
 func (p *Header) SrcPort() uint16 { return (uint16(p.hdr[4]) << 8) | uint16(p.hdr[5]) }
 
@@ -246,6 +247,7 @@ func (p *Header) BinaryString(mc ...int) string {
 
 func (p *Header) Raw() []byte {
 	if len(p.raw) <= 0 {
+		//TODO: more accurate
 		buf := make([]byte,DefaultMaxPDUSize)
 		p.raw = buf
 		c:=0
@@ -335,6 +337,11 @@ func NewHeader(raw []byte) (ret *Header,err error) {
 	}
 
 	end := c + int(ret.DataLen())
+	if end != len(raw) {
+		err = fmt.Errorf("PacketLen does not match received data length: %d/%d. Possibly fragmentation error.",end,len(raw))
+		return
+	}
+
 	ret.payload = raw[c:end]
 
 	// Check checksum
@@ -516,13 +523,17 @@ func NewSYN(version byte,srcport, destport, wsize, maxpdusize, maxsdusize uint16
 	ret.setMaxPDUSize(maxpdusize)
 	ret.setMaxSDUSize(maxsdusize)
 	ret.setIdentification(identification)
-	ret.setHeaderLen(byte(BASE_HLEN + 4 + 1 + len(identification)))
+	ret.setHeaderLen(uint8(BASE_HLEN + (4 + 1) + len(identification)))
 	ret.UpdateCheckSum()
 	return
 }
 
-func NewSYNACK(syn *Header, wsize,maxpdusize, maxsdusize uint16) (ret *Header) {
-	identification := make([]byte,0) //TODO: check when to use identification
+func NewSYNACK(syn *Header, wsize,maxpdusize, maxsdusize uint16, ids ...[]byte) (ret *Header) {
+	identification := make([]byte,0)
+	if len(ids) > 0 {
+		identification = ids[0]
+	}
+
 	ret = NewSYN(	0,
 			syn.DestPort(),
 			syn.SrcPort(),
@@ -548,9 +559,13 @@ func NewACK(p *Header, seqno, wsize uint16) *Header {
 			0  )
 }
 
-func (p *Header) SetEAK(eaks []uint16) {
+func (p *Header) SetEAK(eaks []uint16) error{
+	if len(eaks) > MaxEAKs {
+		return fmt.Errorf("Too many EAKs in one packet: %d/%d",len(eaks),MaxEAKs)
+	}
 	p.setExtendedAcks(eaks)
 	p.UpdateCheckSum()
+	return nil
 }
 
 func NewDataACK(version byte, srcport,destport,seqno,ackno,wsize uint16, data []byte) (ret *Header) {

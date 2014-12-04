@@ -24,6 +24,7 @@ type config struct {
 	identification string
 	nibble bool
 	log bool
+	hexlog bool
 }
 
 var cfg config
@@ -39,6 +40,7 @@ func init() {
 	flag.BoolVar(&cfg.nibble, "n", false, "nibbled identification")
 	flag.IntVar(&cfg.clientCattpPort, "p",1, "client cattp port")
 	flag.BoolVar(&cfg.log,"v",false,"verbose logging")
+	flag.BoolVar(&cfg.hexlog,"h",false,"hex logging")
 }
 
 
@@ -131,7 +133,8 @@ func main() {
 				Log.Fatalf("Failed to open source: %s",err)
 			}
 
-			for x := handle.Next();;x = handle.Next() {
+			//TODO: Fix this ugly condition for file end detection.
+			for x := handle.Next();len(cfg.infile) > 0 && x != nil;x = handle.Next() {
 				if x != nil {
 					func (p *pcap.Packet) {
 						defer func() {
@@ -143,6 +146,9 @@ func main() {
 						p.Decode() // Decode pcap packet
 						if cp,err := NewPacket(p); err == nil {
 							fmt.Println(cp)
+							if cfg.hexlog {
+								fmt.Println(hex.Dump(cp.Raw()))
+							}
 						}
 					}(x)
 				}
@@ -183,9 +189,10 @@ func main() {
 				func (c *Connection,ps []*Header, data []byte) {
 					fmt.Printf("%s>\n%s",c.RemoteAddr().String(),hex.Dump(data))
 				},
-				func(c *Connection) {
+				SocketParameters{
+					CONNECTION_HANDLER: func(c *Connection) {
 					Log.Printf("Incoming Connection from %s with identification: %s",c.RemoteAddr().String(),string(c.Identification()))
-				})
+					}})
 
 			Log.Fatalf("Server stopped: %s",err)
 		default:

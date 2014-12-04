@@ -13,6 +13,7 @@ type Packet struct {
 	udp *pcap.Udphdr
 }
 
+// String function voverts the packet data into a human readable logline.
 func (p *Packet) String() string{
 	return fmt.Sprintf("|%15s:%5d > %15s:%5d|%s v%d |hl %d |p %d > %d |dl %5d |sq %5d |ac %5d |ws %5d |ck %5d |pl %5d |mps %d |mss %d %s",
 		p.ip.SrcAddr(),

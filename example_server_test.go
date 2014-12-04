@@ -3,7 +3,6 @@ package cattp
 
 import (
 	"fmt"
-	"log"
 	"time"
 )
 

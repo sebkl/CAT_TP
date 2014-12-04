@@ -18,6 +18,17 @@ const (
 	SYNSENT = iota
 )
 
+//Socket parameter
+const (
+	CONNECTION_HANDLER = iota
+	RECEIVEWINDOW_SIZE = iota
+	IDENTIFICATION = iota
+)
+
+type ParameterKey int
+type ParameterValue interface{}
+type SocketParameters map[ParameterKey]ParameterValue
+
 //RetransmitCount is a configurable value to specify the amount of retries 
 // that will be performed until a connection is considered to be disconnected.
 var RetransmitCount int = 2
@@ -31,17 +42,36 @@ type Handler func (c *Connection,ps []*Header, data []byte)
 // ConnectionHandler is the callback type for an incoming connection.
 type ConnectionHandler func (c *Connection)
 
+type cattpListener struct {
+	server *Server
+	handler Handler
+	conHandler ConnectionHandler
+	clients map[string]*Connection
+	lport uint16
+	socketParameters SocketParameters
+}
+
+// newCattpListener is an internally used function to create a new virtual 
+// listener instance for a given cattp port.
+func (srv *Server) newCattpListener(lport uint16, handler Handler) *cattpListener{
+	return &cattpListener{
+		server: srv,
+		lport: lport,
+		handler: handler,
+		clients: make(map[string]*Connection),
+		socketParameters: make(SocketParameters),
+	}
+}
+
+
 // Server represents a listen server (UDP) that accepts client connections.
 type Server struct {
 	closing bool
 	abort bool
 	conn *net.UDPConn
 	laddr *net.UDPAddr
-	lport uint16
-	clients map[string]*Connection
-	handler map[uint16]Handler
 	closewait chan error
-	conHandler ConnectionHandler
+	listeners map[uint16]*cattpListener
 }
 
 // SendWindow keeps track of which sent packets have been acknowledged or not.
@@ -62,6 +92,7 @@ type ReceiveWindow struct {
 }
 
 //clientKey is an internally used function to identify connections on UDP level
+//TODO: remove port, is not required anymore.
 func clientKey(a *net.UDPAddr, lp uint16)  string {
 	return fmt.Sprintf("%s@%d",a.String(),lp)
 }
@@ -77,7 +108,6 @@ func NewSendWindow(last uint16,size uint16) *SendWindow {
 func NewReceiveWindow(inorder uint16, size uint16) *ReceiveWindow {
 	return &ReceiveWindow{buf: make([]*Header,size),last: inorder }
 }
-
 
 // Add adds a packet to the sent window once it was sent.
 func (s *SendWindow) Add(h *Header) *sendTimeout {
@@ -186,7 +216,7 @@ type sendTimeout struct {
 type Connection struct {
 	syn *Header
 	identification []byte
-	server *Server
+	listener *cattpListener
 	state byte
 	conn *net.UDPConn
 	inbuf *bytes.Buffer
@@ -201,6 +231,7 @@ type Connection struct {
 	receiveWindow *ReceiveWindow
 	sendWindow *SendWindow
 	handler Handler
+	conHandler ConnectionHandler
 	cwtimer chan(<-chan time.Time)
 	rttimer chan *sendTimeout
 	pkgout chan *Header // only used for manual packet sending
@@ -209,6 +240,20 @@ type Connection struct {
 	pkgin chan *Header
 	// Generated packets from Write call which will be stupidly forwarded to a private send method
 	dataout chan []byte
+
+	socketParameters SocketParameters
+}
+
+func (c *Connection) localIdentification() []byte {
+	d := []byte{}
+	if id,ok := c.socketParameters.get(IDENTIFICATION,d).([]byte); ok {
+		if len(id) > MaxIdenficationLen {
+			Log.Printf("Identification length truncated to %d bytes",MaxIdenficationLen)
+			return id[:MaxIdenficationLen]
+		}
+		return id
+	}
+	return d
 }
 
 func (c *Connection) Identification() []byte { return c.identification }
@@ -256,16 +301,19 @@ func (c *Connection) RCV_SDU_SIZE_MAX() uint16 { return c.maxsdusize }
 //This is the number of PDUs that can be received, counting from SND_UNA_PDU_SEQ_NB-1. 
 func (c *Connection) RCV_WIN_SIZE() uint16 {
 	if c.receiveWindow == nil {
-		return DefaultWindowSize
+		ws,ok := c.socketParameters.get(RECEIVEWINDOW_SIZE,DefaultWindowSize).(uint16);
+		if !ok {
+			ws = DefaultWindowSize
+		}
+		return ws
 	} else {
 		return c.receiveWindow.WindowSize()
 	}
 }
 
-
 //StateS returns the current state of the connection in human readable form.
 func (c *Connection) StateS() (ret string) {
-	if c.server == nil {
+	if c.listener == nil {
 		ret = "CLT_"
 	} else {
 		ret = "SRV_"
@@ -295,12 +343,16 @@ func (c *Connection) send(p *Header) (err error) {
 
 	if p.SupportsEAK() {
 		// Do EAK enrichment.
-		p.SetEAK(c.receiveWindow.oosSeqNo())
+		// TODO: prevent to many EAKS
+		 err = p.SetEAK(c.receiveWindow.oosSeqNo())
+		 if err != nil {
+			return
+		}
 	}
 
 	Log.Printf("%s Sending %s packet to: %s",c.StateS(),p.TypeS(),c.raddr.String())
 	Log.Printf(">%s",p.String())
-	if c.server != nil {
+	if c.listener != nil {
 		w,err = c.conn.WriteToUDP(p.raw,c.raddr)
 	} else {
 		w,err = c.conn.Write(p.raw)
@@ -335,8 +387,17 @@ func NewConnection(lport,rport uint16) (con *Connection) {
 				dataout: make(chan []byte,10),
 				pkgin: make(chan *Header,10),
 				pkgout: make(chan *Header,10),
+				socketParameters: make(SocketParameters),
 			}
 	return
+}
+
+func (s SocketParameters) get(key ParameterKey, d ParameterValue) ParameterValue{
+	if v,ok := s[key]; ok {
+		return v
+	} else {
+		return d
+	}
 }
 
 //retransmit performs a retransmit of the given  sequence number if
@@ -412,7 +473,7 @@ func (con *Connection) packetReader() {
 }
 
 //Connect tries to connect to a remote CAT_TP server. It is not blocking.
-func Connect(addr string, lport, rport uint16, id []byte, handlers ...Handler) (con *Connection, err error) {
+func Connect(addr string, lport, rport uint16, id []byte, handler Handler,params ...SocketParameters) (con *Connection, err error) {
 	n := "udp" /*udp4 or udp6 */
 	raddr, err := net.ResolveUDPAddr(n,addr)
 	if err != nil {
@@ -426,21 +487,25 @@ func Connect(addr string, lport, rport uint16, id []byte, handlers ...Handler) (
 	con = NewConnection(lport,rport)
 	con.raddr = raddr
 	con.conn = conn
-	if len(handlers) > 0 {
-		con.handler = handlers[0]
-	} else {
-		con.handler = BufferHandler
+	con.handler = handler
+
+	if len(params) > 0 {
+		con.socketParameters = params[0]
 	}
 
 	if id == nil {
 		id = []byte{}
 	}
 
+	if len(id) > MaxIdenficationLen {
+		return nil,fmt.Errorf("Identification len too long: %d/%d",len(id),MaxIdenficationLen)
+	}
+
 	//Send syn
 	syn := NewSYN(	0,
 			lport, // TODO: allocate local port
 			rport,
-			DefaultWindowSize,
+			con.RCV_WIN_SIZE(),
 			DefaultMaxPDUSize,
 			DefaultMaxSDUSize,
 			id )
@@ -464,8 +529,8 @@ func (con *Connection) WaitForClose() error {
 }
 
 //ConnectWait is a convenient function for a blocking connect.
-func ConnectWait(addr string, lport, rport uint16, id []byte, handlers ...Handler) (con *Connection, err error) {
-	con,err = Connect(addr,lport,rport,id,handlers...)
+func ConnectWait(addr string, lport, rport uint16, id []byte, handler Handler, params ...SocketParameters) (con *Connection, err error) {
+	con,err = Connect(addr,lport,rport,id,handler,params...)
 	return con,con.WaitForConnect()
 }
 
@@ -473,8 +538,9 @@ func ConnectWait(addr string, lport, rport uint16, id []byte, handlers ...Handle
 // socket.
 func (c *Connection) closeSocket() (err error) {
 	Log.Printf("Closing connection %s -> %s",c.raddr.String(),c.laddr.String())
-	if c.server != nil {
-		delete(c.server.clients,clientKey(c.raddr,c.lport))
+	l := c.listener
+	if l != nil {
+		delete(l.clients,clientKey(c.raddr,c.lport))
 	} else {
 		//Only shutdown connection if we are the client.
 		err  = c.conn.Close()
@@ -536,11 +602,11 @@ func (c *Connection) processPacket(h *Header) (err error) {
 			// nothing hapens here. Only open call expected.
 		case CLOSEWAIT:
 			// TODO: Check what happens with packets here ? discard ?
-			// After delay TO CLose and free resources
+			// After delay TO Close and free resources
 		case LISTEN:
 			//Only accept SYN in CLOSE state
 			if h.Type() == SYN {
-				sa := NewSYNACK(h,c.RCV_WIN_SIZE(),0,0)
+				sa := NewSYNACK(h,c.RCV_WIN_SIZE(),0,0,c.localIdentification())
 				c.syn = sa
 				err = c.send(sa)
 				c.state = SYNRCVD
@@ -554,13 +620,15 @@ func (c *Connection) processPacket(h *Header) (err error) {
 						return fmt.Errorf("Incorrect AckNo in SYNACK: %d/%d",h.AckNo(),c.SND_NXT_SEQ_NB())
 					}
 
+					c.identification = h.Identification() /* Client stes remote server identification */
+
 					c.sendWindow = NewSendWindow(
 						c.SND_INI_SEQ_NB(),
 						h.WindowSize()) // Allocate the sending window for server.
+
 					c.receiveWindow = NewReceiveWindow(
 						h.SeqNo(),
-						DefaultWindowSize) // Allocate the receive Window for server.
-
+						c.RCV_WIN_SIZE()) // Allocate the receive Window for server.
 					ack := NewACK(	h,
 							c.SND_NXT_SEQ_NB(),
 							c.RCV_WIN_SIZE())
@@ -586,16 +654,17 @@ func (c *Connection) processPacket(h *Header) (err error) {
 					c.sendWindow = NewSendWindow(
 						c.SND_INI_SEQ_NB(),
 						h.WindowSize()) // Allocate the sending window for server.
+
 					c.receiveWindow = NewReceiveWindow(
 						c.syn.AckNo(),
-						DefaultWindowSize) // Allocate the receive Window for server.
+						c.RCV_WIN_SIZE()) // Allocate the receive Window for server.
 					//no packet to be sent here.
 					c.state = OPEN
 
 					//Do the freakin incoming connection callback.
-					if c.server != nil && c.server.conHandler != nil {
+					if c.conHandler != nil {
 						// Perform incoming connection callback
-						c.server.conHandler(c)
+						c.conHandler(c)
 					}
 					return
 				case RST:
@@ -667,15 +736,28 @@ func (c *Connection) processPacket(h *Header) (err error) {
 
 //write is an internally used method to create and send a data packet with the
 // given payload.
-func (c *Connection) write(data []byte) error {
-	//TODO: split up packages if length of data exceeds max PDU/SDU (fragmentation)
-	return c.send(NewDataACK(	0,
+func (c *Connection) write(data []byte) (err error) {
+	for  ;len(data) > DefaultMaxSDUSize; {
+		err = c.send(NewDataACK(0,
 				c.lport,
 				c.rport,
 				c.SND_NXT_SEQ_NB(),
 				c.RCV_CUR_SEQ_NB(),
-				DefaultWindowSize,
-				data) )
+				c.receiveWindow.WindowSize(),
+				data[:DefaultMaxSDUSize]) )
+		data = data[DefaultMaxSDUSize:]
+		if err != nil {
+			return
+		}
+	}
+
+	return c.send(NewDataACK(0,
+			c.lport,
+			c.rport,
+			c.SND_NXT_SEQ_NB(),
+			c.RCV_CUR_SEQ_NB(),
+			c.receiveWindow.WindowSize(),
+			data) )
 }
 
 // Send is an exported method to manually send individual packets. It is intended to be
@@ -745,42 +827,53 @@ func readPacket(conn *net.UDPConn) (ret *Header,raddr *net.UDPAddr,err error) {
 	return ret,raddr,err
 }
 
+
+
+//countClients returns the amount of open client connections for all ports
+func (srv *Server) countClients() (ret int) {
+	for _,l := range srv.listeners {
+		ret += len(l.clients)
+	}
+	return
+}
+
 //packetReader is the server side loop to accpet new CAT_TP connections as well as
 // route incoming packets to the corresponding CAT_TP connections.
 func (srv *Server) packetReader() (err error) {
 	//Receive packets as long as client are existing and Close call has not yet been initiated.
-	srv.closewait = make(chan error,1)
-	for ;(!srv.closing || len(srv.clients) > 0) && !srv.abort; {
+	for ;(!srv.closing || srv.countClients() > 0) && !srv.abort; {
 		srv.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		p,raddr,err := readPacket(srv.conn)
 
 		if err != nil {
 			if !strings.HasSuffix(err.Error(),"timeout") {
-				Log.Printf("Error reading packet: %s (%t,%d,%t)",err,srv.closing,len(srv.clients),srv.abort)
+				Log.Printf("Error reading packet: %s (%t,%d,%t)",err,srv.closing,srv.countClients(),srv.abort)
 			}
 			continue
 		}
 
-		var handler Handler
+		var listener *cattpListener
 		var ok bool
 		var cc *Connection
 
-		if handler,ok = srv.handler[p.DestPort()]; !ok {
-			Log.Printf("Unassigned port: %d",p.DestPort())
+		if listener,ok = srv.listeners[p.DestPort()]; !ok {
+			Log.Printf("Unassigned port. No Listener found for port %d",p.DestPort())
 			continue
 		}
 
-		if cc,ok = srv.clients[clientKey(raddr,p.DestPort())]; !ok {
+		if cc,ok = listener.clients[clientKey(raddr,p.DestPort())]; !ok {
 			//Connection does not yet exist
-			cc = NewConnection(srv.lport,p.SrcPort())
-			cc.server = srv
-			cc.handler = handler //looked up above
+			cc = NewConnection(listener.lport,p.SrcPort())
+			cc.listener = listener
+			cc.handler = listener.handler //looked up above
+			cc.conHandler = listener.conHandler
 			cc.raddr = raddr
 			cc.laddr = srv.laddr
 			cc.conn = srv.conn
 			cc.state = LISTEN
 			cc.lport = p.DestPort()
-			srv.clients[clientKey(raddr,p.DestPort())] = cc
+			cc.socketParameters = listener.socketParameters
+			listener.clients[clientKey(raddr,p.DestPort())] = cc
 			go func(cc *Connection) {cc.loop()}(cc) // start own routine per connection.
 		}
 		cc.pkgin <- p // send packet to the connection inbound queue/channel
@@ -807,8 +900,10 @@ func (srv *Server) Kill(clients bool) {
 	srv.Close()
 	srv.abort = true
 	if clients {
-		for _,clt := range srv.clients {
-			clt.Kill()
+		for _,l := range srv.listeners {
+			for _,clt := range l.clients {
+				clt.Kill()
+			}
 		}
 	}
 	Log.Printf("Closing UDP socket for listen server.")
@@ -816,22 +911,42 @@ func (srv *Server) Kill(clients bool) {
 	//srv.clients = nil
 }
 
+// newServer initializes a new server instance.
 func newServer() (srv *Server) {
 	srv = new(Server)
-	srv.handler = make(map[uint16]Handler)
+	srv.listeners = make(map[uint16]*cattpListener)
 	return srv
 }
 
-func (srv *Server) SetListener(lport uint16, handler Handler) *Server {
-	if _,exists := srv.handler[lport]; exists {
+//SetListener adds another CATTP port Listener to an existing UDP server socket.
+// This functon can be used to listen to multiple CATTP ports on a single UDP server socket.
+func (srv *Server) SetListener(lport uint16, handler Handler, params ...SocketParameters) *Server {
+	if _,exists := srv.listeners[lport]; exists {
 		Log.Printf("Overwriting port listener: %d",lport)
 	}
-	srv.handler[lport] = handler
+
+	l := srv.newCattpListener(lport,handler)
+
+	if len(params) > 0 {
+		l.socketParameters = params[0]
+
+		for _,v := range params[1:] {
+			for k,vv := range v {
+				l.socketParameters[k] = vv
+			}
+		}
+
+		if v,ok := l.socketParameters[CONNECTION_HANDLER].(ConnectionHandler); ok {
+			l.conHandler = v
+		}
+	}
+
+	srv.listeners[lport] = l
 	return srv
 }
 
 //listen creates a server and sets it in LISTEN state.
-func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
+func listen(as string, lport uint16, handler Handler, params []SocketParameters) (srv *Server,err error) {
 	n := "udp"
 	srv = newServer()
 
@@ -847,31 +962,29 @@ func listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
 		return
 	}
 	srv.conn = conn
-	srv.SetListener(lport,handler)
-	srv.clients = make(map[string]*Connection)
+	srv.SetListener(lport,handler,params...)
+	srv.closewait = make(chan error,1)
 	return
 }
 
 //Listen starts a CAT_TP server asynchronously.
-func Listen(as string, lport uint16, handler Handler) (srv *Server,err error) {
-	srv,err = listen(as,lport,handler)
+func Listen(as string, lport uint16, handler Handler, params ...SocketParameters) (srv *Server,err error) {
+	srv,err = listen(as,lport,handler,params)
 	if err != nil {
 		return
 	}
+
 	go srv.packetReader()
 	return
 }
 
 //Listen starts a CAT_TP server synchronously. It will block until the server 
 // is in state CLOSED.
-func KeepListening(as string, lport uint16, handler Handler, conHandler ...ConnectionHandler) (err error) {
-	srv,err := listen(as,lport,handler)
+func KeepListening(as string, lport uint16, handler Handler, params ...SocketParameters) (err error) {
+	srv,err := listen(as,lport,handler,params)
 	if err !=nil {
 		return
 	}
 
-	if len(conHandler) > 0 {
-		srv.conHandler = conHandler[0]
-	}
 	return srv.packetReader()
 }

@@ -41,7 +41,6 @@ func LogHandler(c *Connection,ps []*Header, data []byte) {
 	Log.Printf(">#%X\n",data)
 }
 
-
 // BufferHandler is the default handler that pushes all incoming
 // data to the corresponding buffer. This data can be read by using
 // the io.Reader interface accordingly.
@@ -64,4 +63,3 @@ func Nibble(data []byte) []byte {
 	}
 	return ret
 }
-
