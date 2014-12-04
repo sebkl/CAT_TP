@@ -5,6 +5,7 @@ import(
 	"time"
 	"os"
 	"log"
+	"encoding/hex"
 )
 
 func init() {
@@ -289,13 +290,13 @@ func TestICCID(t *testing.T) {
 		t.Errorf("Could not connect to server: %s",err)
 	}
 
-	iccid := "8934FFFFFFFFFFFFFFFF"
+	iccid,_ := hex.DecodeString("8934FFFFFFFFFFFFFFFF")
 
 	c,err:= ConnectWait("localhost:8770",1,9000,Nibble([]byte(iccid)),func(c *Connection, h []*Header, data []byte) {})
-	c.Write([]byte{'0'})
+	c.Write([]byte("ICCID Test"))
 	time.Sleep(100 * time.Millisecond)
 
-	if riccid != iccid {
+	if riccid != string(iccid) {
 		t.Errorf("ICCID incorrect: %s/%s",riccid,iccid)
 	}
 
