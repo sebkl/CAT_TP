@@ -3,6 +3,7 @@ package cattp
 //It is supposed to support both, cleint and server side implementations as well in the future.
 
 import(
+	. "github.com/sebkl/CAT_TP"
 	"github.com/miekg/pcap"
 	"fmt"
 )

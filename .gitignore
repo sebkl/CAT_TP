@@ -1,2 +1,7 @@
 Makefile
 cattpcmd/Makefile
+cattpcmd/bin
+pcap/Makefile
+pcap/cattptrace/Makefile
+pcap/cattptrace/test.pcap
+pcap/cattptrace/bin

@@ -17,6 +17,14 @@ func TestSetup(t *testing.T) {
 	//TODO: START a tracer for the entire session
 }
 
+func TestChecksum(t *testing.T) {
+	syn := NewSYN(0,1, 9000, 10, 1024, 1024 , []byte("IDENTIFICATION"))
+	syn.setCheckSum(0)
+	t.Logf("Checksum: %x",syn.CheckSum())
+	syn.UpdateCheckSum()
+	t.Logf("Checksum: %x",syn.CheckSum())
+}
+
 func TestReceiveWindowExceed(t *testing.T) {
 	p := NewDataACK(0,1,9000,11,100,10,[]byte{})
 	rw := NewReceiveWindow(0,10)
