@@ -18,6 +18,7 @@ type config struct {
 	clientCattpPort int
 	identification string
 	nibble bool
+	hexdecode bool
 	log bool
 	hexlog bool
 }
@@ -28,6 +29,7 @@ var cfg config
 func init() {
 	flag.StringVar(&cfg.identification, "id", "", "identification")
 	flag.BoolVar(&cfg.nibble, "n", false, "nibbled identification")
+	flag.BoolVar(&cfg.hexdecode, "he", false, "hex decode identification (provide hex encoded)")
 	flag.IntVar(&cfg.clientCattpPort, "p",1, "client cattp port")
 	flag.BoolVar(&cfg.log,"v",false,"verbose logging")
 	flag.BoolVar(&cfg.hexlog,"h",false,"hex logging")
@@ -102,8 +104,19 @@ func main() {
 			addr := args[1]
 			cattp_port := mustParsePort(args[2])
 			id := []byte(cfg.identification)
+			var err error
+
+			if cfg.hexdecode {
+				id,err = hex.DecodeString(string(id))
+				if err != nil {
+					Log.Fatalf("Could not hex decode id '%s' : %s",string(id),err)
+				}
+				Log.Printf("Decoded id to '%s'",hex.Dump(id))
+			}
+
 			if cfg.nibble {
 				id = Nibble(id)
+				Log.Printf("Nibbled id to '%s'",hex.Dump(id))
 			}
 
 			con,err := ConnectWait(addr, uint16(cfg.clientCattpPort), cattp_port, id,
